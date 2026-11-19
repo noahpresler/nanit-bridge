@@ -1,0 +1,54 @@
+# Optional: run the bridge as a scheduled GitHub Action instead of on your own machine.
+#
+# Read this first. A bridge is meant to run where your device login already lives. Here, the
+# login has to be a GitHub secret, so GitHub (and anyone who can edit this repo's workflows)
+# can use it. Use a private repo, a login that can only read, and a Miara token limited to
+# the one child and the write scopes this bridge needs. If you can run it on your own machine
+# instead, see schedule/.
+#
+# Setup: Settings -> Secrets and variables -> Actions. Add MIARA_TOKEN and MIARA_CHILD_ID, and
+# whatever your fetch() needs (for example DEVICE_USER and DEVICE_PASSWORD), then list those
+# below under `env`. Change `on.schedule` to suit, and set USING_SAMPLE_DATA = False in bridge.py once fetch() is yours.
+name: bridge
+
+on:
+  schedule:
+    - cron: "17 * * * *"   # hourly, off the hour. Scheduled runs can be late; that's fine, runs only send what's new.
+  workflow_dispatch: {}
+
+concurrency:
+  group: miara-bridge
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # state.json holds the last sync time. Actions has no disk that lasts, so keep it in the cache.
+      # If it's ever evicted the bridge just resends, and Miara answers "unchanged".
+      - uses: actions/cache@v4
+        with:
+          path: state.json
+          key: bridge-state-${{ github.run_id }}
+          restore-keys: bridge-state-
+
+      - name: Run the bridge
+        env:
+          MIARA_TOKEN: ${{ secrets.MIARA_TOKEN }}
+          MIARA_CHILD_ID: ${{ secrets.MIARA_CHILD_ID }}
+          # DEVICE_USER: ${{ secrets.DEVICE_USER }}
+          # DEVICE_PASSWORD: ${{ secrets.DEVICE_PASSWORD }}
+        run: python bridge.py

@@ -1,0 +1,15 @@
+# Your device login and Miara token. Never commit these.
+.env
+.env.*
+*.pem
+
+# Where the last sync time lives. It's yours, not the template's.
+state.json
+state.sandbox.json
+state*.tmp
+
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.DS_Store
