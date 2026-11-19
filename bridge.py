@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-"""A bridge from your own device's data to Miara.
+"""A bridge from a Nanit camera to Miara: sleeps as they happen, plus room temperature and humidity.
 
-Three parts:
+Unofficial. Nanit has no public API; this uses the calls its app makes. See README.md.
 
-  fetch(since)  YOURS. Get what's new from your device or service. Ships as a stub.
-  map(items)    YOURS. Turn what fetch returned into Miara entries and readings.
-  send(...)     DONE. Batches, idempotency keys, retries, limits, a summary.
+  python bridge.py setup               sign in to Nanit once (asks for the code Nanit sends you)
+  python bridge.py probe               show the shape of what Nanit returns (field names only)
+  python bridge.py --dry-run           read Nanit, print what would be sent, send nothing
+  python bridge.py                     one sync (for cron or launchd)
+  python bridge.py watch               keep running: every minute or two, sooner when Miara asks
+  python bridge.py --sandbox [watch]   made-up Nanit data into Miara's public sandbox family
 
-Run it:   python bridge.py --sandbox            (public sandbox, made-up family)
-          python bridge.py --sandbox --dry-run  (show what it would send, send nothing)
-          python bridge.py                      (your family: needs MIARA_TOKEN, MIARA_CHILD_ID)
-
-Your device login stays in your own environment. This file never sends it to Miara.
+Your Nanit login stays on this machine. This file never sends it to Miara.
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
+import getpass
 import hashlib
 import json
 import os
@@ -25,109 +26,256 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import nanit
+
 DEFAULT_BASE = "https://getmiara.com/api/v1"
 SANDBOX_TOKEN = "miara_pat_5a4d0b0c5a4d0b0c5a4d0b0c5a4d0b0c5a4d0b0c"
 
-# What this bridge's data is called in Miara. Becomes the prefix of every source_event_id,
-# and the middle part of any metric you declare: x.<SOURCE>.<metric>.
-SOURCE = "sample"
+# Prefix of every source_event_id this bridge writes.
+SOURCE = "nanit"
+DECLARED_METRICS: list[dict] = []
 
-# Metrics of your own. Numbers in a range, or 2 to 12 lowercase choices. Never free text.
-# Declared once, on the first run that uses them. Delete this one if you don't need it.
-DECLARED_METRICS = [
-    {"metric": "x.sample.score", "label": "Sleep score", "unit": "points", "min": 0, "max": 100},
-]
+# How far back each sync looks. Nanit finishes a sleep's record after the fact, so every sync
+# re-reads the last two days; rows that haven't changed since they were sent aren't sent again.
+LOOKBACK = timedelta(hours=48)
+# A wake shorter than this doesn't end a sleep (a stir, a resettle).
+SHORT_WAKE = timedelta(minutes=5)
+# A sleep whose wake we never saw is treated as over after this long.
+MAX_OPEN = timedelta(hours=16)
+# Room readings at most this often.
+ROOM_EVERY = timedelta(minutes=10)
+# Also send sleeps someone logged in the Nanit app. Off: if you log in Miara too, they'd overlap.
+INCLUDE_NANIT_LOGS = os.environ.get("NANIT_INCLUDE_LOGS", "") == "1"
 
-
-# True while fetch() below is still the made-up sample. A bridge that is still the sample
-# refuses to send to a real family. Set it to False when you've written your own fetch().
-USING_SAMPLE_DATA = True
+# watch: how long to wait between syncs.
+WATCH_ASLEEP = 60        # a sleep is open: catch the wake within a minute
+WATCH_ACTIVE = 120       # something happened in the last two hours
+WATCH_QUIET = 600        # nothing for two hours
+WATCH_MAX_BACKOFF = 900  # after errors
 
 
 # ---------------------------------------------------------------------------
-# 1. fetch: REPLACE THIS
+# 1. fetch: what Nanit has for each baby in the last LOOKBACK
 # ---------------------------------------------------------------------------
 
-def fetch(since: datetime | None) -> list[dict]:
-    """Return what's new since `since` (a UTC datetime, or None on the first run).
+async def fetch_async(n: nanit.Nanit, state: dict, now: datetime) -> list[dict]:
+    """Return items for map(): one {"type": "baby", ...} block per baby."""
+    start, end = int((now - LOOKBACK).timestamp()), int(now.timestamp())
+    out = []
+    for baby in await n.babies():
+        if not baby.uid:
+            continue
+        feed = await n.feed(baby.uid, start, end)
+        calendar = await n.calendar(baby.uid, start, end)
+        room = (None, None)
+        last_room = state.get("room_at", {}).get(baby.uid)
+        if last_room is None or now - parse_time(last_room) >= ROOM_EVERY - timedelta(seconds=5):
+            room = await n.room(baby)
+        out.append({"type": "baby", "uid": baby.uid, "feed": feed, "calendar": calendar,
+                    "room": {"celsius": room[0], "humidity": room[1]}, "at": iso(now)})
+    return out
 
-    REPLACE THIS. The code below returns made-up sample data so the template runs as it is.
 
-    Your own version reads from wherever your data lives: the service's API, an export file,
-    a local database. Use your own login from the environment (os.environ["DEVICE_PASSWORD"],
-    a .env file kept out of git), never from this repo, and never send it to Miara.
+# ---------------------------------------------------------------------------
+# 2. map: Nanit's timeline into Miara sleeps and readings
+# ---------------------------------------------------------------------------
 
-    Return plain dicts. Keep each item's own id from the service: map() builds the
-    source_event_id from it, so the same item always lands on the same entry.
+def sleeps_from_feed(feed: list[dict], open_sleep: dict | None = None) -> list[dict]:
+    """FELL_ASLEEP / WOKE_UP pairs into sleeps: {"key", "start", "end" or None}.
+
+    A wake shorter than SHORT_WAKE joins the sleeps on either side. `open_sleep` is a sleep
+    still open at the end of the last sync, for a WOKE_UP whose FELL_ASLEEP has scrolled out
+    of Nanit's feed (it only returns about the 50 newest items).
     """
-    day = (datetime.now(timezone.utc) - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    at = lambda h, m=0: (day + timedelta(hours=h, minutes=m)).isoformat()  # noqa: E731
-    tag = day.strftime("%Y%m%d")
-    items = [
-        {"id": f"sleep-{tag}", "type": "sleep", "start": at(2), "end": at(8, 30), "updated_at": at(8, 30)},
-        {"id": f"bottle-{tag}", "type": "bottle", "at": at(10, 15), "ml": 120, "milk": "formula", "updated_at": at(10, 15)},
-        {"id": f"feed-{tag}", "type": "nursing", "at": at(12), "left_s": 480, "right_s": 360, "updated_at": at(12, 15)},
-        {"id": f"diaper-{tag}", "type": "diaper", "at": at(13, 30), "kind": "wet", "updated_at": at(13, 30)},
-        {"id": f"pump-{tag}", "type": "pump", "at": at(15), "ml": 90, "updated_at": at(15)},
-        {"id": f"score-{tag}", "type": "score", "at": at(8, 30), "points": 82, "updated_at": at(8, 30)},
-    ]
-    # A room sensor: one temperature reading every 10 minutes for an hour.
-    for i in range(7):
-        items.append({"id": f"room-{tag}-{i}", "type": "room", "at": at(2, 10 * i), "celsius": round(21.0 + i * 0.1, 1),
-                      "updated_at": at(2, 10 * i)})
-    # The night's stages, as the device saw them.
-    for i, (stage, a, b) in enumerate([("light", (2, 0), (2, 40)), ("deep", (2, 40), (4, 10)), ("rem", (4, 10), (5, 0))]):
-        items.append({"id": f"stage-{tag}-{i}", "type": "stage", "stage": stage, "start": at(*a), "end": at(*b),
-                      "updated_at": at(*b)})
-    if since is not None:
-        items = [i for i in items if parse_time(i["updated_at"]) >= since]
-    return items
+    events = sorted((e for e in feed if e.get("kind", "event") == "event" and e.get("key") in ("FELL_ASLEEP", "WOKE_UP")
+                     and not e.get("deleted_at") and e.get("time") is not None),
+                    key=lambda e: float(e["time"]))
+    sleeps: list[dict] = []
+    cur = dict(open_sleep) if open_sleep else None
+    for e in events:
+        at = datetime.fromtimestamp(float(e["time"]), timezone.utc)
+        if e["key"] == "FELL_ASLEEP":
+            if cur and cur["end"] is None:
+                continue  # already asleep
+            if cur and cur["end"] is not None and at - cur["end"] < SHORT_WAKE:
+                cur["end"] = None  # a short wake: the same sleep goes on
+                continue
+            if cur:
+                sleeps.append(cur)
+            cur = {"key": str(e.get("uid") or int(float(e["time"]))), "start": at, "end": None}
+        else:  # WOKE_UP
+            if cur and cur["end"] is None and at > cur["start"]:
+                cur["end"] = at
+    if cur:
+        sleeps.append(cur)
+    return sleeps
 
 
-# ---------------------------------------------------------------------------
-# 2. map: REPLACE THIS TOO
-# ---------------------------------------------------------------------------
+def sleeps_from_calendar(calendar: list[dict]) -> list[dict]:
+    """Finished sleeps from Nanit's calendar: auto_sleep (the camera saw it) and, if asked, sleep (logged in Nanit)."""
+    kinds = {"auto_sleep"} | ({"sleep"} if INCLUDE_NANIT_LOGS else set())
+    out = []
+    for c in calendar:
+        if c.get("type") not in kinds or c.get("time") is None or not c.get("duration"):
+            continue
+        start = datetime.fromtimestamp(float(c["time"]), timezone.utc)
+        # `duration` is the one to trust: `net_duration` has come back doubled.
+        out.append({"key": str(c.get("uid") or int(float(c["time"]))), "start": start,
+                    "end": start + timedelta(seconds=float(c["duration"]))})
+    return out
 
-def map(items: list[dict]) -> tuple[list[dict], list[dict]]:  # noqa: A001 (shadows the builtin on purpose)
-    """Turn fetched items into (entries, readings). child_id is added for you in send().
 
-    Entries are things that happened: kind is sleep, bottle, nursing, diaper or pump.
-        {"source_event_id", "kind", "started_at", "ended_at" (sleeps), "details", "raw"}
-    Readings are measurements: a core metric (heart_rate, spo2, room_temp_c, sleep_stage ...)
-    or one you declared above. Numbers or one of a fixed set of words, nothing else.
-        {"metric", "started_at", "ended_at" (sleep_stage), "value"}
+def _overlaps(a_start, a_end, b_start, b_end) -> bool:
+    far = datetime.max.replace(tzinfo=timezone.utc)
+    return a_start < (b_end or far) and b_start < (a_end or far)
 
-    Always build source_event_id from the service's own id with event_id(), never from
-    the time you ran or a counter. Details are checked like the app checks them:
-    https://getmiara.com/developers
+
+def merge_sleeps(baby_uid: str, feed_sleeps: list[dict], cal_sleeps: list[dict], known: dict) -> list[dict]:
+    """One Miara entry per real sleep, whichever Nanit list it came from.
+
+    A sleep keeps the source_event_id it was first sent with (from `known`: sid -> [start, end]),
+    so the live entry made at FELL_ASLEEP is the one that gets its end and Nanit's final times.
+    The calendar's finished sleep wins on times; the feed fills in a sleep still going on.
     """
+    out: dict[str, dict] = {}
+
+    def claim(s: dict) -> str:
+        for sid, (ks, ke) in known.items():
+            k_start = parse_time(ks)
+            # A sleep we never saw end only reaches so far, or it would swallow every later one.
+            k_end = parse_time(ke) if ke else k_start + MAX_OPEN
+            if _overlaps(s["start"], s["end"], k_start, k_end):
+                return sid
+        for sid, o in out.items():
+            if _overlaps(s["start"], s["end"], o["start"], o["end"]):
+                return sid
+        return event_id(f"{baby_uid}:{s['key']}")
+
+    for s in cal_sleeps:
+        sid = claim(s)
+        if sid in out:  # Nanit split what we already have as one sleep: keep the whole span
+            o = out[sid]
+            o["start"], o["end"] = min(o["start"], s["start"]), max(o["end"], s["end"])
+        else:
+            out[sid] = {"start": s["start"], "end": s["end"], "from": "calendar"}
+    for s in feed_sleeps:
+        sid = claim(s)
+        if sid in out:
+            continue  # the calendar already has it, finished
+        out[sid] = {"start": s["start"], "end": s["end"], "from": "feed"}
+    return [{"sid": sid, **v} for sid, v in out.items()]
+
+
+def map(items: list[dict], state: dict | None = None, children: dict | None = None) -> tuple[list[dict], list[dict]]:  # noqa: A001
+    """Turn fetch() output into (entries, readings), each with its Miara child_id.
+
+    Updates `state` with the sleeps it made (so ids stay put) and when it last read the room.
+    """
+    state = state if state is not None else {}
+    children = children or {}
     entries: list[dict] = []
     readings: list[dict] = []
     for it in items:
-        t = it.get("type")
-        if t == "sleep":
-            entries.append({"source_event_id": event_id(it["id"]), "kind": "sleep",
-                            "started_at": iso(it["start"]), "ended_at": iso(it["end"]), "details": {}})
-        elif t == "bottle":
-            entries.append({"source_event_id": event_id(it["id"]), "kind": "bottle", "started_at": iso(it["at"]),
-                            "details": {"volume_ml": it["ml"], "contents": {"formula": "formula", "breast": "breast_milk"}.get(it["milk"], "mixed")}})
-        elif t == "nursing":
-            entries.append({"source_event_id": event_id(it["id"]), "kind": "nursing", "started_at": iso(it["at"]),
-                            "details": {"left_seconds": it["left_s"], "right_seconds": it["right_s"]}})
-        elif t == "diaper":
-            entries.append({"source_event_id": event_id(it["id"]), "kind": "diaper", "started_at": iso(it["at"]),
-                            "details": {"diaper": it["kind"]}})
-        elif t == "pump":
-            entries.append({"source_event_id": event_id(it["id"]), "kind": "pump", "started_at": iso(it["at"]),
-                            "details": {"total_ml": it["ml"]}})
-        elif t == "room":
-            readings.append({"metric": "room_temp_c", "started_at": iso(it["at"]), "value": it["celsius"]})
-        elif t == "stage":
-            readings.append({"metric": "sleep_stage", "started_at": iso(it["start"]), "ended_at": iso(it["end"]), "value": it["stage"]})
-        elif t == "score":
-            readings.append({"metric": "x.sample.score", "started_at": iso(it["at"]), "value": it["points"]})
-        # Anything else is left out on purpose. Don't send what you can't map to a number or a choice.
+        if it.get("type") != "baby":
+            continue
+        uid = it["uid"]
+        child = children.get(uid) or children.get("*")
+        if not child:
+            continue  # a Nanit baby you didn't connect to a Miara child
+        known = state.setdefault("sleeps", {}).setdefault(uid, {})
+        open_prev = state.setdefault("open", {}).get(uid)
+        if open_prev:
+            open_prev = {"key": open_prev["key"], "start": parse_time(open_prev["start"]), "end": None}
+        feed_sleeps = sleeps_from_feed(it.get("feed", []), open_prev)
+        merged = merge_sleeps(uid, feed_sleeps, sleeps_from_calendar(it.get("calendar", [])), known)
+        still_open = None
+        for s in merged:
+            e = {"source_event_id": s["sid"], "kind": "sleep", "child_id": child,
+                 "started_at": iso(s["start"]), "details": {}}
+            if s["end"] is not None:
+                e["ended_at"] = iso(s["end"])
+            else:
+                still_open = {"key": s["sid"], "start": iso(s["start"])}
+            entries.append(e)
+            known[s["sid"]] = [iso(s["start"]), iso(s["end"]) if s["end"] else None]
+        if still_open:
+            state["open"][uid] = still_open
+        else:
+            state["open"].pop(uid, None)
+
+        room = it.get("room") or {}
+        minute = iso(parse_time(it["at"]).replace(second=0, microsecond=0))
+        if room.get("celsius") is not None:
+            readings.append({"metric": "room_temp_c", "child_id": child, "started_at": minute, "value": round(float(room["celsius"]), 1)})
+        if room.get("humidity") is not None:
+            readings.append({"metric": "humidity", "child_id": child, "started_at": minute, "value": round(float(room["humidity"]))})
+        if room.get("celsius") is not None or room.get("humidity") is not None:
+            state.setdefault("room_at", {})[uid] = it["at"]
+    prune_known(state, LOOKBACK * 3)
     return entries, readings
+
+
+def prune_known(state: dict, keep: timedelta, now: datetime | None = None) -> None:
+    cutoff = (now or datetime.now(timezone.utc)) - keep
+    for uid, known in state.get("sleeps", {}).items():
+        for sid in [s for s, (start, _end) in known.items() if parse_time(start) < cutoff]:
+            del known[sid]
+    sent = state.get("sent", {})
+    for key in [k for k, v in sent.items() if parse_time(v.get("at", "1970-01-01T00:00:00Z")) < cutoff]:
+        del sent[key]
+
+
+def is_asleep(state: dict) -> bool:
+    return bool(state.get("open"))
+
+
+def recently_active(state: dict, now: datetime, within: timedelta = timedelta(hours=2)) -> bool:
+    for known in state.get("sleeps", {}).values():
+        for start, end in known.values():
+            if now - parse_time(end or start) < within:
+                return True
+    return False
+
+
+def parse_children(spec: str) -> dict:
+    """MIARA_CHILDREN: 'nanitBabyUid=miaraChildId,otherUid=otherId'. A lone id means every baby."""
+    out = {}
+    for part in filter(None, (p.strip() for p in spec.split(","))):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            out[k.strip()] = v.strip()
+        else:
+            out["*"] = part
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Made-up Nanit data, for --sandbox. Nothing real goes to the public sandbox.
+# ---------------------------------------------------------------------------
+
+class SampleNanit:
+    """Answers like Nanit, with a made-up baby: a nap, last night, and one asleep right now."""
+
+    def __init__(self, now: datetime | None = None):
+        self.now = now or datetime.now(timezone.utc)
+
+    def get(self, path: str, params: dict) -> dict:
+        n = self.now.replace(second=0, microsecond=0)
+        t = lambda h, m=0: (n - timedelta(hours=h, minutes=m)).timestamp()  # noqa: E731
+        if path == "/babies":
+            return {"babies": [{"uid": "samplebaby", "name": "Sample", "camera_uid": "samplecam"}]}
+        if path.endswith("/feed"):
+            ev = lambda uid, key, at: {"kind": "event", "uid": uid, "key": key, "time": at}  # noqa: E731
+            return {"feed": [ev("f1", "PUT_IN_BED", t(14, 5)), ev("f2", "FELL_ASLEEP", t(14)), ev("f3", "WOKE_UP", t(12, 10)),
+                             ev("f4", "FELL_ASLEEP", t(12, 7)), ev("f5", "WOKE_UP", t(4)), ev("f6", "MOTION", t(3)),
+                             ev("f7", "FELL_ASLEEP", t(0, 25))]}
+        if path.endswith("/calendar"):
+            return {"calendar": [{"uid": "c1", "type": "auto_sleep", "time": t(14), "duration": 10 * 3600},
+                                 {"uid": "c2", "type": "diaper_change", "time": t(3, 50)}]}
+        return {}
+
+    def room(self, baby) -> tuple[float, float]:
+        return 21.4, 46.0
 
 
 # ---------------------------------------------------------------------------
@@ -341,27 +489,64 @@ def declare_metrics(client: Client, readings: list[dict], state: dict) -> list[s
     return declared_now
 
 
-def send(client: Client, child_id: str, entries: list[dict], readings: list[dict], state: dict | None = None) -> dict:
-    """Send entries then readings in batches. Returns a summary dict (see print_summary)."""
+def fingerprint(row: dict) -> str:
+    return hashlib.sha256(canonical(row).encode()).hexdigest()[:16]
+
+
+def unsent(rows: list[dict], state: dict, key) -> list[dict]:
+    """Only the rows that changed since they were last sent. A bridge that re-reads the last
+    two days every minute would otherwise send the same rows hundreds of times a day."""
+    sent = state.get("sent", {})
+    return [r for r in rows if sent.get(key(r), {}).get("fp") != fingerprint(r)]
+
+
+def mark_sent(rows: list[dict], state: dict, key, now: str) -> None:
+    sent = state.setdefault("sent", {})
+    for r in rows:
+        sent[key(r)] = {"fp": fingerprint(r), "at": now}
+
+
+def entry_key(e: dict) -> str:
+    return "e:" + e["source_event_id"]
+
+
+def reading_key(r: dict) -> str:
+    return f"r:{r['child_id']}:{r['metric']}:{r['started_at']}"
+
+
+def send(client: Client, child_id: str | None, entries: list[dict], readings: list[dict], state: dict | None = None,
+         now: str | None = None) -> dict:
+    """Send what changed, entries then readings, in batches. Returns a summary dict (see print_summary).
+
+    Each row may carry its own child_id (one bridge, several children); `child_id` fills in the rest.
+    """
     state = state if state is not None else {}
+    now = now or iso(datetime.now(timezone.utc))
+    entries = [dict(e, child_id=e.get("child_id") or child_id) for e in entries]
+    readings = [dict(r, child_id=r.get("child_id") or child_id) for r in readings]
+    entries, readings = unsent(entries, state, entry_key), unsent(readings, state, reading_key)
     replayed_before = client.replayed
     summary = {"replayed": 0, "entries": {s: 0 for s in STATUSES}, "reasons": [], "readings_saved": 0, "readings_received": 0, "declared": []}
     for batch in batches(entries):
-        body = {"entries": [dict(e, child_id=child_id) for e in batch]}
-        res = client.request("POST", "/events:batch", body)
+        res = client.request("POST", "/events:batch", {"entries": batch})
+        done = set()
         for r in res.get("results", []):
             status = r.get("status", "rejected")
             summary["entries"][status] = summary["entries"].get(status, 0) + 1
             if status in ("suggested", "skipped", "rejected"):
                 summary["reasons"].append((status, r.get("source_event_id"), r.get("error") or _STATUS_WORDS[status]))
+            if status != "rejected":
+                done.add(r.get("source_event_id"))
+        mark_sent([e for e in batch if e["source_event_id"] in done], state, entry_key, now)
     if readings:
         summary["declared"] = declare_metrics(client, readings, state)
         for batch in batches(readings):
-            body = {"readings": [dict(r, child_id=child_id) for r in batch]}
-            res = client.request("POST", "/observations:batch", body)
+            res = client.request("POST", "/observations:batch", {"readings": batch})
             summary["readings_saved"] += res.get("saved", 0)
             summary["readings_received"] += res.get("received", len(batch))
+            mark_sent(batch, state, reading_key, now)
     summary["replayed"] = client.replayed - replayed_before
+    summary["sent"] = len(entries) + len(readings)
     return summary
 
 
@@ -411,73 +596,211 @@ def pick_sandbox_child(client: Client) -> str:
     return kids[0]["id"]
 
 
-def main(argv: list[str] | None = None, http=None, sleep=time.sleep, now=None) -> int:
-    ap = argparse.ArgumentParser(description="Send your own device's data to Miara.")
-    ap.add_argument("--sandbox", action="store_true", help="use the public sandbox token and its first child (made-up family)")
-    ap.add_argument("--dry-run", action="store_true", help="fetch and map, print what would be sent, send nothing, keep state as it is")
-    ap.add_argument("--child", help="child id (or set MIARA_CHILD_ID)")
-    ap.add_argument("--since", help="fetch from this ISO time instead of the last sync")
-    ap.add_argument("--full", action="store_true", help="ignore the last sync and fetch everything (resends come back unchanged)")
+# ---------------------------------------------------------------------------
+# One sync, watch, setup, probe
+# ---------------------------------------------------------------------------
+
+def stamp() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def resolve_children(client: Client | None, sandbox: bool, cli_child: str | None) -> dict:
+    spec = os.environ.get("MIARA_CHILDREN", "") or cli_child or os.environ.get("MIARA_CHILD_ID", "")
+    children = parse_children(spec)
+    if not children and sandbox and client is not None:
+        children = {"*": pick_sandbox_child(client)}
+    return children
+
+
+async def sync_once(n, client: Client | None, state: dict, children: dict, now: datetime, dry_run: bool = False,
+                    quiet: bool = False) -> dict | None:
+    items = await fetch_async(n, state, now)
+    if dry_run and not children:
+        children = {"*": "MIARA_CHILDREN-not-set"}  # so a dry run still shows what it would send
+    entries, readings = map(items, state, children)
+    entries, readings, problems = check(entries, readings, {d["metric"] for d in DECLARED_METRICS})
+    if dry_run:
+        print(f"Read Nanit: {len(items)} baby(ies), {len(entries)} sleep(s), {len(readings)} reading(s) from the last "
+              f"{int(LOOKBACK.total_seconds() // 3600)} hours.")
+        for e in entries:
+            print("  entry  ", canonical(e))
+        for r in readings:
+            print("  reading", canonical(r))
+        for sid, why in problems:
+            print(f"  would reject: {sid}: {why}")
+        print("Dry run: nothing was sent.")
+        return None
+    summary = await asyncio.to_thread(send, client, None, entries, readings, state, iso(now))
+    if summary["sent"] or problems or not quiet:
+        prefix = f"{stamp()} " if quiet else ""
+        if summary["sent"]:
+            print_summary(summary, problems, out=lambda s: print(prefix + s))
+        elif not quiet:
+            print("Nothing new to send.")
+    state["last_sync"] = iso(now)
+    return summary
+
+
+async def wait_for_next(client: Client, seconds: float, state: dict) -> str:
+    """Wait `seconds`, or less if Miara says someone wants fresh data (the app opened, a pull to refresh).
+
+    Miara holds GET /wait open for up to 25 seconds and answers early with {"woken": true}.
+    An older Miara without /wait gets a plain sleep.
+    """
+    deadline = time.monotonic() + seconds
+    while (left := deadline - time.monotonic()) > 1:
+        if state.get("wait_unsupported"):
+            await asyncio.sleep(left)
+            return "timeout"
+        try:
+            res = await asyncio.to_thread(client.request, "GET", f"/wait?timeout={int(min(left, 25))}")
+        except BridgeError as exc:
+            if "not_found" in str(exc) or "404" in str(exc):
+                state["wait_unsupported"] = True
+                continue
+            await asyncio.sleep(min(left, 30))
+            continue
+        if res.get("woken"):
+            return "woken"
+    return "timeout"
+
+
+def next_interval(state: dict, now: datetime) -> int:
+    if is_asleep(state):
+        return WATCH_ASLEEP
+    if recently_active(state, now):
+        return WATCH_ACTIVE
+    return WATCH_QUIET
+
+
+async def watch(n, client: Client, state: dict, state_path: Path, children: dict) -> int:
+    for stream in (sys.stdout, sys.stderr):  # a line at a time, so launchd's log keeps up
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(line_buffering=True)
+    print(f"{stamp()} Watching Nanit. Every {WATCH_ASLEEP}s while asleep, {WATCH_ACTIVE}s after activity, "
+          f"{WATCH_QUIET}s when quiet, and right away when Miara asks. Ctrl-C to stop.")
+    backoff = 0
+    while True:
+        now = datetime.now(timezone.utc)
+        try:
+            await sync_once(n, client, state, children, now, quiet=True)
+            save_state(state_path, state)
+            backoff = 0
+            wait = next_interval(state, now)
+        except DailyLimit as exc:
+            print(f"{stamp()} Stopped for now: {exc}", file=sys.stderr)
+            wait = 3600
+        except (BridgeError, nanit.NanitError) as exc:
+            backoff = min(max(backoff * 2, 60), WATCH_MAX_BACKOFF)
+            print(f"{stamp()} {exc} Trying again in {backoff // 60 or 1} min.", file=sys.stderr)
+            wait = backoff
+        why = await wait_for_next(client, wait, state)
+        if why == "woken":
+            print(f"{stamp()} Miara asked for fresh data.")
+
+
+def do_setup() -> int:
+    print("Sign in to Nanit. Your password is used once, here, and never saved: only the session Nanit gives back is,\n"
+          f"in {nanit.session_path()} (readable only by you).")
+    email = input("Nanit email: ").strip()
+    password = getpass.getpass("Nanit password: ")
+    try:
+        babies = asyncio.run(nanit.setup(email, password, lambda: input("Code Nanit sent you: ")))
+    except nanit.NanitError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print("\nSigned in. Your Nanit babies:")
+    for b in babies:
+        print(f"  {b.uid}  {b.name or '(no name)'}{'' if b.camera_uid else '  (no camera)'}")
+    print("\nNext: set MIARA_CHILDREN to <Nanit uid>=<Miara child id> for each (see README.md),\n"
+          "then try: python bridge.py --dry-run")
+    return 0
+
+
+def shape(value, depth: int = 0):
+    """Field names and types only: enough to see what Nanit sends, nothing about your baby."""
+    if isinstance(value, dict):
+        return {k: shape(v, depth + 1) for k, v in value.items()} if depth < 4 else "{…}"
+    if isinstance(value, list):
+        return [shape(value[0], depth + 1), f"×{len(value)}"] if value else []
+    if isinstance(value, str) and value.isupper() and len(value) < 32:
+        return value  # event keys and types like FELL_ASLEEP are the point
+    return type(value).__name__
+
+
+async def probe(n) -> int:
+    now = int(time.time())
+    for b in await n.babies():
+        print(f"Baby {b.uid}: camera {'yes' if b.camera_uid else 'no'}")
+        feed = await n.feed(b.uid, now - 172800, now)
+        keys: dict[str, int] = {}
+        for e in feed:
+            k = f"{e.get('kind')}:{e.get('key') or e.get('type')}"
+            keys[k] = keys.get(k, 0) + 1
+        print(f"  feed: {len(feed)} items in 48 h: {keys}")
+        if feed:
+            print("  feed item shape:", json.dumps(shape(feed[0])))
+        cal = await n.calendar(b.uid, now - 172800, now)
+        types: dict[str, int] = {}
+        for c in cal:
+            types[c.get("type")] = types.get(c.get("type"), 0) + 1
+        print(f"  calendar: {len(cal)} items in 48 h: {types}")
+        sleeps = [c for c in cal if c.get("type") == "auto_sleep"]
+        if sleeps:
+            print("  auto_sleep shape:", json.dumps(shape(sleeps[0])))
+        t, h = await n.room(b)
+        print(f"  room: temperature {'yes' if t is not None else 'no'}, humidity {'yes' if h is not None else 'no'}")
+    return 0
+
+
+def main(argv: list[str] | None = None, http=None, sleep=time.sleep, now=None, nanit_rest=None) -> int:
+    ap = argparse.ArgumentParser(description="Send a Nanit camera's sleeps and room readings to Miara.")
+    ap.add_argument("command", nargs="?", default="sync", choices=["sync", "watch", "setup", "probe"])
+    ap.add_argument("--sandbox", action="store_true", help="made-up Nanit data into Miara's public sandbox family")
+    ap.add_argument("--dry-run", action="store_true", help="read Nanit and print what would be sent; send nothing")
+    ap.add_argument("--child", help="Miara child id for every Nanit baby (or set MIARA_CHILDREN)")
     ap.add_argument("--state", help="state file (default state.json, or state.sandbox.json with --sandbox)")
     args = ap.parse_args(argv)
 
+    if args.command == "setup":
+        return do_setup()
+
     base = os.environ.get("MIARA_BASE", DEFAULT_BASE)
     token = SANDBOX_TOKEN if args.sandbox else os.environ.get("MIARA_TOKEN", "")
-    child = args.child or os.environ.get("MIARA_CHILD_ID", "")
     state_path = Path(args.state or ("state.sandbox.json" if args.sandbox else "state.json"))
-    started = (now or datetime.now(timezone.utc))
+    rest = nanit_rest or (SampleNanit(now) if args.sandbox else None)
 
-    try:
-        if not token and not args.dry_run:
-            raise BridgeError("No token. Make one in the app (Profile → Siri, assistants and connections → New connection), "
-                              "then set MIARA_TOKEN. To try it without one, run with --sandbox.")
-        if USING_SAMPLE_DATA and not args.sandbox and not args.dry_run:
-            raise BridgeError("fetch() is still the made-up sample, so this won't send it to a real family. "
-                              "Write your own fetch() and map(), then set USING_SAMPLE_DATA = False. "
-                              "To try the sample, run with --sandbox.")
-        client = Client(base, token, http=http, sleep=sleep)
-        state = load_state(state_path)
-        if args.since:
-            since = parse_time(args.since)
-        elif args.full or not state.get("last_sync"):
-            since = None
-        else:
-            since = parse_time(state["last_sync"])
-
-        items = fetch(since)
-        entries, readings = map(items)
-        declared = {d["metric"] for d in DECLARED_METRICS}
-        entries, readings, problems = check(entries, readings, declared)
-        print(f"Fetched {len(items)} item(s) since {iso(since) if since else 'the beginning'}: "
-              f"{len(entries)} entries, {len(readings)} readings.")
-
-        if args.dry_run:
-            for e in entries[:20]:
-                print("  entry  ", canonical(e))
-            for r in readings[:20]:
-                print("  reading", canonical(r))
-            for sid, why in problems:
-                print(f"  would reject: {sid}: {why}")
-            print("Dry run: nothing was sent and the last sync time is unchanged.")
+    async def run() -> int:
+        async with nanit.Nanit(rest=rest) as n:
+            if args.command == "probe":
+                return await probe(n)
+            if not token and not args.dry_run:
+                raise BridgeError("No Miara token. Make one in the app (Profile → Siri, assistants and connections → "
+                                  "New connection), then set MIARA_TOKEN. To try it without one, run with --sandbox.")
+            client = Client(base, token, http=http, sleep=sleep) if token else None
+            children = resolve_children(client, args.sandbox, args.child)
+            state = load_state(state_path)
+            if args.dry_run:
+                await sync_once(n, client, state, children, now or datetime.now(timezone.utc), dry_run=True)
+                return 0
+            if not children:
+                raise BridgeError("No Miara child. Set MIARA_CHILDREN=<Nanit uid>=<Miara child id> (python bridge.py setup "
+                                  "lists the Nanit uids; GET /children lists the Miara ids this token can write to).")
+            if args.command == "watch":
+                return await watch(n, client, state, state_path, children)
+            await sync_once(n, client, state, children, now or datetime.now(timezone.utc))
+            save_state(state_path, state)
             return 0
 
-        if not entries and not readings:
-            print("Nothing new to send.")
-        else:
-            if not child:
-                if args.sandbox:
-                    child = pick_sandbox_child(client)
-                else:
-                    raise BridgeError("No child. Set MIARA_CHILD_ID (or pass --child). GET /children lists the ids this token is for.")
-            summary = send(client, child, entries, readings, state)
-            print_summary(summary, problems)
-        state["last_sync"] = iso(started)
-        save_state(state_path, state)
+    try:
+        return asyncio.run(run())
+    except KeyboardInterrupt:
+        print("\nStopped.")
         return 0
     except DailyLimit as exc:
-        print(f"Stopped: {exc}\nThe last sync time was not moved, so the next run picks up where this one stopped.", file=sys.stderr)
+        print(f"Stopped: {exc}\nNothing is lost: the next run sends what this one couldn't.", file=sys.stderr)
         return 3
-    except BridgeError as exc:
+    except (BridgeError, nanit.NanitError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

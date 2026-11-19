@@ -1,0 +1,21 @@
+# Linux (systemd, e.g. a Raspberry Pi or home server): keep `bridge.py watch` running.
+#
+# User install:
+#   cp nanit-bridge.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now nanit-bridge.service
+#   loginctl enable-linger "$USER"          (keep it running when you're logged out)
+#   journalctl --user -u nanit-bridge -f    (the log)
+[Unit]
+Description=Send a Nanit camera's sleeps to Miara
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/nanit-bridge
+EnvironmentFile=%h/nanit-bridge/.env
+ExecStart=%h/nanit-bridge/.venv/bin/python bridge.py watch
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=default.target

@@ -1,7 +1,0 @@
-# Run the bridge every 15 minutes. Edit with: crontab -e
-#
-# Cron has almost no environment, so the line loads your .env first and uses full paths.
-# Replace /home/you/miara-bridge with where you cloned it.
-#
-# .env (not in git) holds MIARA_TOKEN, MIARA_CHILD_ID and your device login.
-*/15 * * * * cd /home/you/miara-bridge && set -a && . ./.env && set +a && /usr/bin/python3 bridge.py >> bridge.log 2>&1

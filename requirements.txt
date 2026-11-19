@@ -1,1 +1,2 @@
 requests>=2.31
+aionanit==1.14.1

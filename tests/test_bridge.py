@@ -41,33 +41,118 @@ def client(http, sleeps=None):
     return bridge.Client("https://example.test/api/v1", "tok", http=http, sleep=(sleeps.append if sleeps is not None else lambda s: None))
 
 
-class MapTests(unittest.TestCase):
-    def test_sample_maps_to_entries_and_readings(self):
-        entries, readings = bridge.map(bridge.fetch(None))
-        self.assertEqual({e["kind"] for e in entries}, {"sleep", "bottle", "nursing", "diaper", "pump"})
-        self.assertEqual({r["metric"] for r in readings}, {"room_temp_c", "sleep_stage", "x.sample.score"})
-        self.assertTrue(all(e["source_event_id"].startswith("sample:") for e in entries))
+T0 = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
 
-    def test_source_event_ids_come_from_vendor_ids_and_are_stable(self):
-        a, _ = bridge.map(bridge.fetch(None))
-        b, _ = bridge.map(bridge.fetch(None))
-        self.assertEqual([e["source_event_id"] for e in a], [e["source_event_id"] for e in b])
-        self.assertEqual(len({e["source_event_id"] for e in a}), len(a))
+
+def ts(h, m=0):
+    """Epoch seconds h hours (and m minutes) before T0."""
+    return (T0 - bridge.timedelta(hours=h, minutes=m)).timestamp()
+
+
+def ev(uid, key, at):
+    return {"kind": "event", "uid": uid, "key": key, "time": at}
+
+
+def baby(feed=(), calendar=(), room=None, uid="b1", at=T0):
+    return {"type": "baby", "uid": uid, "feed": list(feed), "calendar": list(calendar),
+            "room": room or {"celsius": None, "humidity": None}, "at": bridge.iso(at)}
+
+
+class MapTests(unittest.TestCase):
+    kids = {"b1": CHILD}
+
+    def test_sample_gives_last_night_finished_and_a_sleep_going_on(self):
+        n = bridge.SampleNanit(T0)
+        items = [baby(n.get("/babies/x/feed", {})["feed"], n.get("/babies/x/calendar", {})["calendar"])]
+        entries, _ = bridge.map(items, {}, self.kids)
+        self.assertEqual(len(entries), 2)
+        night, now = sorted(entries, key=lambda e: e["started_at"])
+        self.assertEqual((night["started_at"], night["ended_at"]), ("2026-11-17T22:00:00Z", "2026-11-18T08:00:00Z"))
+        self.assertNotIn("ended_at", now)
+        self.assertTrue(all(e["source_event_id"].startswith("nanit:b1:") and e["child_id"] == CHILD for e in entries))
+
+    def test_short_wake_does_not_split_a_sleep(self):
+        feed = [ev("a", "FELL_ASLEEP", ts(10)), ev("b", "WOKE_UP", ts(9)), ev("c", "FELL_ASLEEP", ts(8, 57)), ev("d", "WOKE_UP", ts(6))]
+        self.assertEqual(len(bridge.sleeps_from_feed(feed)), 1)
+        feed[2] = ev("c", "FELL_ASLEEP", ts(8, 30))
+        self.assertEqual(len(bridge.sleeps_from_feed(feed)), 2)
+
+    def test_motion_and_deleted_events_are_ignored(self):
+        feed = [ev("a", "MOTION", ts(3)), dict(ev("b", "FELL_ASLEEP", ts(2)), deleted_at="2026-11-18T11:00:00Z")]
+        self.assertEqual(bridge.sleeps_from_feed(feed), [])
+
+    def test_live_sleep_keeps_its_id_when_nanit_finishes_it(self):
+        state = {}
+        first, _ = bridge.map([baby([ev("f7", "FELL_ASLEEP", ts(1))])], state, self.kids)
+        self.assertEqual(len(first), 1)
+        self.assertNotIn("ended_at", first[0])
+        self.assertTrue(bridge.is_asleep(state))
+        # An hour later the wake has happened and Nanit's calendar has the finished sleep, a minute off.
+        later = [baby([ev("f7", "FELL_ASLEEP", ts(1)), ev("f8", "WOKE_UP", ts(0, 10))],
+                      [{"uid": "c9", "type": "auto_sleep", "time": ts(1, 1), "duration": 3060, "net_duration": 6120}])]
+        second, _ = bridge.map(later, state, self.kids)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(second[0]["source_event_id"], first[0]["source_event_id"])
+        self.assertEqual(second[0]["started_at"], "2026-11-18T10:59:00Z")
+        self.assertEqual(second[0]["ended_at"], "2026-11-18T11:50:00Z")  # duration, not the doubled net_duration
+        self.assertFalse(bridge.is_asleep(state))
+
+    def test_wake_after_fell_asleep_scrolled_out_of_the_feed(self):
+        state = {}
+        bridge.map([baby([ev("f1", "FELL_ASLEEP", ts(9))])], state, self.kids)
+        noisy = [ev(f"m{i}", "MOTION", ts(0, i)) for i in range(50)] + [ev("w", "WOKE_UP", ts(0, 5))]
+        entries, _ = bridge.map([baby(noisy)], state, self.kids)
+        self.assertEqual([e.get("ended_at") for e in entries], ["2026-11-18T11:55:00Z"])
+
+    def test_only_connected_babies_and_each_to_its_child(self):
+        items = [baby([ev("a", "FELL_ASLEEP", ts(1))], uid="b1"), baby([ev("z", "FELL_ASLEEP", ts(1))], uid="b2")]
+        entries, _ = bridge.map(items, {}, {"b2": "child-2"})
+        self.assertEqual([(e["child_id"], e["source_event_id"]) for e in entries], [("child-2", "nanit:b2:z")])
+
+    def test_nanit_logged_naps_are_left_out_unless_asked(self):
+        cal = [{"uid": "n1", "type": "sleep", "time": ts(5), "duration": 1800}]
+        self.assertEqual(bridge.sleeps_from_calendar(cal), [])
+
+    def test_room_readings_rounded_to_the_minute(self):
+        at = T0.replace(second=42)
+        _, readings = bridge.map([baby(room={"celsius": 21.437, "humidity": 45.6}, at=at)], {}, self.kids)
+        self.assertEqual(readings, [
+            {"metric": "room_temp_c", "child_id": CHILD, "started_at": "2026-11-18T12:00:00Z", "value": 21.4},
+            {"metric": "humidity", "child_id": CHILD, "started_at": "2026-11-18T12:00:00Z", "value": 46}])
+
+    def test_children_spec(self):
+        self.assertEqual(bridge.parse_children("u1=c1, u2=c2"), {"u1": "c1", "u2": "c2"})
+        self.assertEqual(bridge.parse_children("c1"), {"*": "c1"})
 
     def test_event_id_is_valid_for_odd_and_long_ids(self):
-        import re
         for vid in ["a b/c", "x" * 300, "ünï-1"]:
-            out = bridge.event_id(vid)
-            self.assertRegex(out, r"^[A-Za-z0-9._:-]{1,128}$")
+            self.assertRegex(bridge.event_id(vid), r"^[A-Za-z0-9._:-]{1,128}$")
         self.assertNotEqual(bridge.event_id("x" * 300), bridge.event_id("x" * 301))
 
     def test_times_are_utc_z_to_the_second(self):
         self.assertEqual(bridge.iso("2026-11-13T09:00:00-05:00"), "2026-11-13T14:00:00Z")
-        self.assertEqual(bridge.iso("2026-11-13T09:00:00"), "2026-11-13T09:00:00Z")
 
-    def test_fetch_since_filters(self):
-        later = datetime(2100, 1, 1, tzinfo=timezone.utc)
-        self.assertEqual(bridge.fetch(later), [])
+
+class WatchTests(unittest.TestCase):
+    def test_interval_follows_the_baby(self):
+        self.assertEqual(bridge.next_interval({"open": {"b1": {}}}, T0), bridge.WATCH_ASLEEP)
+        recent = {"sleeps": {"b1": {"s": ["2026-11-18T09:00:00Z", "2026-11-18T11:00:00Z"]}}}
+        self.assertEqual(bridge.next_interval(recent, T0), bridge.WATCH_ACTIVE)
+        self.assertEqual(bridge.next_interval({}, T0), bridge.WATCH_QUIET)
+
+    def test_wait_returns_early_when_miara_asks(self):
+        http = FakeHttp(Resp(200, {"woken": False}), Resp(200, {"woken": True}))
+        out = bridge.asyncio.run(bridge.wait_for_next(client(http), 60, {}))
+        self.assertEqual(out, "woken")
+        self.assertEqual(len(http.calls), 2)
+        self.assertIn("/wait?timeout=25", http.calls[0]["url"])
+
+    def test_wait_falls_back_to_sleeping_on_an_older_miara(self):
+        http = FakeHttp(Resp(404, {"error": {"code": "not_found", "message": "No such endpoint."}}))
+        state = {}
+        out = bridge.asyncio.run(bridge.wait_for_next(client(http), 1.5, state))
+        self.assertEqual(out, "timeout")
+        self.assertTrue(state["wait_unsupported"])
 
 
 class CheckTests(unittest.TestCase):
@@ -174,6 +259,13 @@ class RetryTests(unittest.TestCase):
 
 
 class SendTests(unittest.TestCase):
+    def setUp(self):
+        self._declared = bridge.DECLARED_METRICS
+        bridge.DECLARED_METRICS = [{"metric": "x.sample.score", "label": "Sleep score", "unit": "points", "min": 0, "max": 100}]
+
+    def tearDown(self):
+        bridge.DECLARED_METRICS = self._declared
+
     def test_declares_x_metric_once_before_readings(self):
         http = FakeHttp(Resp(200, {"metric": "x.sample.score", "saved": True}), Resp(200, {"saved": 1, "received": 1}))
         state = {}
@@ -182,7 +274,7 @@ class SendTests(unittest.TestCase):
         self.assertEqual([c["url"].rsplit("/", 1)[-1] for c in http.calls], ["metrics", "observations:batch"])
         self.assertEqual(s["declared"], ["x.sample.score"])
         http2 = FakeHttp(Resp(200, {"saved": 0, "received": 1}))
-        bridge.send(client(http2), CHILD, [], readings, state)
+        bridge.send(client(http2), CHILD, [], [dict(readings[0], value=81)], state)
         self.assertEqual(len(http2.calls), 1)  # already declared
 
     def test_summary_lists_reasons(self):
@@ -214,55 +306,83 @@ class ReplayTests(unittest.TestCase):
         self.assertIn("saved nothing twice", "\n".join(lines))
 
 
+class UnsentTests(unittest.TestCase):
+    def test_unchanged_rows_are_not_sent_again(self):
+        e = [{"source_event_id": "nanit:b1:a", "kind": "sleep", "started_at": "2026-11-18T09:00:00Z"}]
+        r = [{"metric": "humidity", "started_at": "2026-11-18T09:00:00Z", "value": 40}]
+        state = {}
+        http = FakeHttp(Resp(200, {"results": [{"source_event_id": "nanit:b1:a", "status": "saved"}]}), Resp(200, {"saved": 1, "received": 1}))
+        bridge.send(client(http), CHILD, e, r, state)
+        http2 = FakeHttp(Resp(500))
+        s = bridge.send(client(http2), CHILD, e, r, state)
+        self.assertEqual((http2.calls, s["sent"]), ([], 0))
+        # The sleep ends: only it goes again.
+        http3 = FakeHttp(Resp(200, {"results": [{"source_event_id": "nanit:b1:a", "status": "updated"}]}))
+        bridge.send(client(http3), CHILD, [dict(e[0], ended_at="2026-11-18T10:00:00Z")], r, state)
+        self.assertEqual(len(http3.calls), 1)
+
+    def test_rejected_rows_are_tried_again(self):
+        e = [{"source_event_id": "a", "kind": "sleep", "started_at": "2026-11-18T09:00:00Z"}]
+        state = {}
+        bridge.send(client(FakeHttp(Resp(200, {"results": [{"source_event_id": "a", "status": "rejected", "error": "x"}]}))), CHILD, e, [], state)
+        http = FakeHttp(Resp(200, {"results": [{"source_event_id": "a", "status": "saved"}]}))
+        bridge.send(client(http), CHILD, e, [], state)
+        self.assertEqual(len(http.calls), 1)
+
+
 class MainTests(unittest.TestCase):
-    def run_main(self, args, http, tmp):
-        env = {"MIARA_BASE": "https://example.test/api/v1"}
-        old = {k: os.environ.get(k) for k in ("MIARA_BASE", "MIARA_TOKEN", "MIARA_CHILD_ID")}
-        os.environ.pop("MIARA_TOKEN", None)
-        os.environ.pop("MIARA_CHILD_ID", None)
-        os.environ.update(env)
+    def run_main(self, args, http, tmp, env=None):
+        keys = ("MIARA_BASE", "MIARA_TOKEN", "MIARA_CHILD_ID", "MIARA_CHILDREN")
+        old = {k: os.environ.get(k) for k in keys}
+        for k in keys:
+            os.environ.pop(k, None)
+        os.environ.update({"MIARA_BASE": "https://example.test/api/v1", **(env or {})})
         try:
-            return bridge.main(args + ["--state", str(Path(tmp) / "s.json")], http=http, sleep=lambda s: None,
-                               now=datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc))
+            return bridge.main(args + ["--state", str(Path(tmp) / "s.json")], http=http, sleep=lambda s: None, now=T0)
         finally:
             for k, v in old.items():
                 os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
 
     def ok_http(self):
-        def many(n):
-            return Resp(200, {"results": [{"source_event_id": "x", "status": "saved"}] * n})
-        return FakeHttp(Resp(200, {"children": [{"id": CHILD}]}), many(5), Resp(200, {"metric": "x.sample.score", "saved": True}),
-                        Resp(200, {"saved": 11, "received": 11}))
+        return FakeHttp(Resp(200, {"children": [{"id": CHILD}]}),
+                        Resp(200, {"results": [{"source_event_id": "nanit:samplebaby:c1", "status": "saved"},
+                                               {"source_event_id": "nanit:samplebaby:f7", "status": "saved"}]}),
+                        Resp(200, {"saved": 2, "received": 2}))
 
-    def test_second_run_sends_nothing_and_state_is_written(self):
+    def test_sandbox_sends_made_up_data_then_nothing_twice(self):
         with tempfile.TemporaryDirectory() as tmp:
             http = self.ok_http()
             self.assertEqual(self.run_main(["--sandbox"], http, tmp), 0)
+            sent = http.calls[1]["body"]["entries"]
+            self.assertEqual(len(sent), 2)
+            self.assertTrue(all(e["child_id"] == CHILD for e in sent))
             state = json.loads((Path(tmp) / "s.json").read_text())
             self.assertEqual(state["last_sync"], "2026-11-18T12:00:00Z")
-            http2 = FakeHttp(Resp(500))
+            http2 = FakeHttp(Resp(200, {"children": [{"id": CHILD}]}), Resp(500))
             self.assertEqual(self.run_main(["--sandbox"], http2, tmp), 0)
-            self.assertEqual(http2.calls, [])  # nothing new, no requests at all
+            self.assertEqual([c["url"].rsplit("/", 1)[-1] for c in http2.calls], ["children"])  # nothing new to send
 
     def test_dry_run_sends_nothing_and_writes_no_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             http = FakeHttp(Resp(500))
-            self.assertEqual(self.run_main(["--sandbox", "--dry-run"], http, tmp), 0)
+            code = bridge.main(["--dry-run", "--state", str(Path(tmp) / "s.json")], http=http, now=T0,
+                               nanit_rest=bridge.SampleNanit(T0))
+            self.assertEqual(code, 0)
             self.assertEqual(http.calls, [])
             self.assertFalse((Path(tmp) / "s.json").exists())
 
-    def test_sample_refuses_a_real_family(self):
+    def test_a_real_family_needs_a_child_mapping(self):
         with tempfile.TemporaryDirectory() as tmp:
             os.environ["MIARA_TOKEN"] = "miara_pat_real"
             try:
                 http = FakeHttp(Resp(500))
-                code = bridge.main(["--child", CHILD, "--state", str(Path(tmp) / "s.json")], http=http)
+                code = bridge.main(["--state", str(Path(tmp) / "s.json")], http=http, now=T0, nanit_rest=bridge.SampleNanit(T0))
             finally:
                 os.environ.pop("MIARA_TOKEN")
             self.assertEqual(code, 1)
             self.assertEqual(http.calls, [])
 
-    def test_daily_limit_keeps_last_sync(self):
+    def test_daily_limit_stops_and_says_nothing_is_lost(self):
         with tempfile.TemporaryDirectory() as tmp:
             http = FakeHttp(Resp(200, {"children": [{"id": CHILD}]}),
                             Resp(429, {"error": {"code": "daily_limit", "message": "Done for today."}}))

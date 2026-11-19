@@ -17,7 +17,11 @@ class LiveSandbox(unittest.TestCase):
         base = os.environ.get("MIARA_BASE", bridge.DEFAULT_BASE)
         c = bridge.Client(base, bridge.SANDBOX_TOKEN)
         child = bridge.pick_sandbox_child(c)
-        entries, readings = bridge.map(bridge.fetch(None))
+        n = bridge.SampleNanit()
+        item = {"type": "baby", "uid": "samplebaby", "feed": n.get("/babies/x/feed", {})["feed"],
+                "calendar": n.get("/babies/x/calendar", {})["calendar"], "room": {"celsius": 21.4, "humidity": 46},
+                "at": bridge.iso(n.now)}
+        entries, readings = bridge.map([item], {}, {"*": child})
         entries, readings, problems = bridge.check(entries, readings, {d["metric"] for d in bridge.DECLARED_METRICS})
         self.assertEqual(problems, [])
         state = {}
@@ -25,7 +29,7 @@ class LiveSandbox(unittest.TestCase):
         self.assertEqual(first["entries"]["rejected"], 0)
         # The same batch would get the same Idempotency-Key and be answered from the first request, so
         # reverse it: same entries, a new key, and Miara has to compare them with what it already holds.
-        again = bridge.send(c, child, entries[::-1], readings[::-1], state)
+        again = bridge.send(c, child, entries[::-1], readings[::-1], {})
         # Entries that were saved or updated the first time come back unchanged. Suggested stay suggested.
         self.assertEqual(again["entries"]["saved"] + again["entries"]["updated"], 0)
         self.assertGreater(again["entries"]["unchanged"] + again["entries"]["suggested"] + again["entries"]["skipped"], 0)

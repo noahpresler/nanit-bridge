@@ -1,133 +1,118 @@
-# miara-bridge
+# nanit-bridge
 
-A small script that sends your own device's data to Miara.
+Sends your Nanit camera's sleeps to [Miara](https://getmiara.com) as they happen, with the nursery's temperature and humidity.
 
-A **bridge** runs on your machine. It asks a device or service for what's new, using your own login for it, turns the answer into Miara entries (a sleep, a bottle, a diaper) and readings (room temperature, sleep stages), and sends them to your family's log. Miara keeps them as your family's data, shows them under the connection's name, and you can turn the connection off or undo everything it wrote.
+- **Sleeps.** When Nanit sees the baby fall asleep, Miara shows a sleep that's still going. When Nanit sees them wake, the sleep gets its end. Once Nanit finishes its own record of that sleep, Miara takes Nanit's final times. It stays one entry the whole way through.
+- **Room.** Temperature and humidity from the camera, every 10 minutes.
+- **Not sent:** Nanit's sleep scores, video, clips, photos, or anything logged in the Nanit app. Diapers and bottles stay where you log them.
 
-This repo is the template. The part that's yours is one function, `fetch`. The rest is done: batching, retries, rate limits, idempotency, a summary of what happened.
+Built from the [miara-bridge](https://github.com/noahpresler/miara-bridge) template.
 
-- Python 3.10 or newer, and one dependency, `requests`.
-- The API: <https://getmiara.com/developers> (plain-text version for agents: <https://getmiara.com/developers/llms.txt>).
+> **Unofficial.** Nanit has no public API. This uses the calls the Nanit app makes, as mapped by the [ha-nanit](https://github.com/wealthystudent/ha-nanit) project (it uses that project's `aionanit` library). Nanit can change them at any time, and this stops working until someone catches up. Nanit's terms may not allow it. Use it for your own account.
 
-## Try it in five minutes
+## What you need
 
-The sandbox is a made-up family that anyone can read and write. It resets every night. You don't need an account.
+- A Nanit camera with sleep tracking (Nanit Insights). Without it you get room readings only.
+- A computer that's always on: a Mac, a Raspberry Pi, a home server.
+- Python 3.10 or newer. The `python3` that comes with macOS is 3.9: get a newer one with `brew install python` or [uv](https://docs.astral.sh/uv/) (`uv venv -p 3.13 .venv && uv pip install -p .venv -r requirements.txt`).
+- A Miara token: in the app, **Profile → Siri, assistants and connections → New connection**, with `read`, `write:events` and `write:observations`, limited to the child or children this is for.
 
-```sh
-git clone https://github.com/noahpresler/miara-bridge.git
-cd miara-bridge
-pip install -r requirements.txt
-
-python bridge.py --sandbox --dry-run   # shows what it would send, sends nothing
-python bridge.py --sandbox             # sends it
-python bridge.py --sandbox             # again: nothing new, so nothing sent
-```
-
-The first real run looks like this:
-
-```
-Fetched 16 item(s) since the beginning: 5 entries, 11 readings.
-Entries:  5 sent. 4 saved, 0 updated, 0 unchanged, 1 suggested, 0 skipped, 0 rejected
-Readings: 11 sent, 11 new or changed
-Declared metric x.sample.score
-  suggested: sample:sleep-20261117: overlaps a sleep someone logged; it waits for them to answer
-```
-
-The sample data is invented by `fetch()` in `bridge.py`. It only runs against the sandbox: until you replace it, the script refuses to send to a real family.
-
-## Make it yours
-
-Open `bridge.py`. There are two functions to write and one list to edit.
-
-**1. `fetch(since)`** gets what's new from your device or service and returns it as plain dicts. How depends on what you have: the service's API, an export file it gives you, a local database. Keep each item's own id.
-
-**2. `map(items)`** turns those dicts into two lists.
-
-- **Entries** are things that happened. `kind` is `sleep`, `bottle`, `nursing`, `diaper` or `pump`. Each needs a `source_event_id` built with `event_id()` from the service's own id, so the same item always lands on the same entry.
-- **Readings** are measurements: `metric`, `started_at`, `value` (and `ended_at` for `sleep_stage`).
-
-**3. `DECLARED_METRICS`** if your device reports something that isn't a core metric. Core metrics are `heart_rate`, `spo2`, `breathing_rate`, `room_temp_c`, `humidity`, `sound_db` and `sleep_stage`. Anything else is a metric of your own, named `x.<source>.<name>`, with a number range or 2 to 12 lowercase choices. The bridge declares it on its first run. Values are numbers or choices. Never free text.
-
-Then set `USING_SAMPLE_DATA = False`, and test the same way as before:
+## Set it up
 
 ```sh
-python bridge.py --sandbox --dry-run
-python bridge.py --sandbox
+git clone https://github.com/noahpresler/nanit-bridge.git
+cd nanit-bridge
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
 
-### Your device login
+**1. Try it with made-up data.** This sends an invented baby's sleeps to Miara's public sandbox family. Nothing of yours is read or sent.
 
-It stays on your machine. Put it in the environment your bridge runs in, for example a `.env` file next to `bridge.py`:
-
+```sh
+.venv/bin/python bridge.py --sandbox --dry-run   # shows what it would send
+.venv/bin/python bridge.py --sandbox             # sends it
 ```
+
+**2. Sign in to Nanit.**
+
+```sh
+.venv/bin/python bridge.py setup
+```
+
+It asks for your Nanit email, password and the code Nanit sends you (use the newest one; they expire quickly). The password is used for this sign-in and never saved. What's saved is the session Nanit gives back, in `~/.config/nanit-bridge/session.json`, readable only by you. That session is full access to your Nanit account: don't copy it anywhere. If you think it leaked, change your Nanit password (that ends every session) and run `setup` again.
+
+Setup prints each Nanit baby's uid.
+
+**3. Connect each baby to a Miara child.** Copy `.env.example` to `.env` and fill it in:
+
+```sh
 MIARA_TOKEN=miara_pat_...
-MIARA_CHILD_ID=...
-DEVICE_USER=...
-DEVICE_PASSWORD=...
+MIARA_CHILDREN=<Nanit uid>=<Miara child id>
 ```
 
-`.env` is in `.gitignore`. Your fetch code reads `os.environ["DEVICE_PASSWORD"]`. The bridge never sends it to Miara, and neither should your code: not in `raw`, not anywhere. Miara never asks for your device login or your Miara password.
+To find Miara child ids: `curl -s -H "Authorization: Bearer $MIARA_TOKEN" https://getmiara.com/api/v1/children`. A Nanit baby you don't list is left alone.
 
-### Your real family
+**4. See what it would send, then send it.**
 
-1. In the Miara app: Profile → Siri, assistants and connections → New connection. Give it a name, pick the children and the scopes (`write:events` for entries, `write:observations` for readings). The token is shown once.
-2. Put it in `.env` as `MIARA_TOKEN`. Put the child's id in `MIARA_CHILD_ID` (or pass `--child`). `GET /children` lists the ids.
-3. `python bridge.py --dry-run`, then `python bridge.py`.
+```sh
+set -a; . ./.env; set +a
+.venv/bin/python bridge.py --dry-run
+.venv/bin/python bridge.py
+```
 
-Settings, in the environment:
+The first run sends the last two days.
 
-| Name | What it does |
+## Keep it running
+
+`bridge.py watch` stays running and checks Nanit:
+
+| When | How often |
 |---|---|
-| `MIARA_TOKEN` | Your token. |
-| `MIARA_CHILD_ID` | The child to write to. `--child` does the same. |
-| `MIARA_BASE` | The API address. Defaults to `https://getmiara.com/api/v1`. |
+| A sleep is going on | every minute, so the wake shows up quickly |
+| Something happened in the last two hours | every 2 minutes |
+| Quiet | every 10 minutes |
+| Someone opens Miara | right away |
 
-Flags: `--sandbox` (the public token and the sandbox's first child), `--dry-run`, `--since <time>`, `--full` (ignore the last sync and fetch everything), `--state <file>`.
+Each check reads the last two days and sends only what changed, so most checks send nothing.
 
-## Schedule it
+- **Mac:** `schedule/com.example.nanit-bridge.plist` (instructions inside). It starts at login and restarts if it stops.
+- **Linux:** `schedule/nanit-bridge.service`.
 
-`state.json` remembers when the last run finished, so each run asks `fetch` only for what's new. Run it every 15 minutes to an hour; nothing breaks if a run is late or is skipped.
+For a plain schedule instead (cron every few minutes): `.venv/bin/python bridge.py`.
 
-| Where | File |
+## How it decides what a sleep is
+
+- A sleep starts at Nanit's **fell asleep** and ends at its **woke up**.
+- A wake shorter than 5 minutes doesn't end the sleep.
+- When Nanit's own finished record arrives, usually soon after the wake, its times replace the live ones on the same entry.
+- If someone already logged that sleep in Miara, the bridge's version doesn't become a second entry. Miara asks them whether to use Nanit's times.
+- A sleep whose wake Nanit never reported is treated as over after 16 hours, and Nanit's finished record corrects it when it arrives.
+
+## Several children
+
+List each baby: `MIARA_CHILDREN=uidA=childA,uidB=childB`. One token can write to all of them if it's limited to those children.
+
+## When something goes wrong
+
+| You see | Do this |
 |---|---|
-| cron (Linux, macOS) | `schedule/crontab.example` |
-| launchd (macOS) | `schedule/com.example.miara-bridge.plist` |
-| systemd (Linux) | `schedule/miara-bridge.service` and `.timer` |
-| GitHub Actions | `.github/workflows/bridge.yml` |
+| `Not signed in to Nanit` or `Nanit signed this bridge out` | Run `python bridge.py setup` again. |
+| `Nanit answered 4xx/5xx for /babies/…` | Nanit changed something or is down. The bridge keeps trying. Check [ha-nanit's issues](https://github.com/wealthystudent/ha-nanit/issues) for news. |
+| `No Miara child` | Set `MIARA_CHILDREN`. |
+| `Daily limit reached` | It waits and carries on. Nothing is lost: the next check sends the rest. |
+| No room readings | The camera is off or in sleep mode. Setting `NANIT_CAMERA_IP` (the camera's address on your network) can help. |
 
-The Action is optional, and it has a cost. A bridge is meant to run where your device login already lives. On GitHub, that login has to be a repository secret, so GitHub, and anyone who can change the workflow, can use it. Keep the repo private, use a login that can only read, and limit the Miara token to one child.
+`python bridge.py probe` prints the shape of what Nanit returns: field names and event types, with no times, names or values. Paste it into an issue if Nanit's answers change.
 
-## The rules
-
-- **Every write is idempotent.** Each request carries an `Idempotency-Key` made from its content. Send the same batch again within 24 hours and Miara returns the first answer and saves nothing twice. Entries also carry your `source_event_id`: sending one again updates that entry instead of adding another. Readings are kept to the minute, one per child, metric and minute; a resend replaces it.
-- **Overlaps come back `suggested`.** If a device's sleep overlaps one a person logged, it isn't saved twice. It waits for them to answer. If they answer or delete it, a resend comes back `skipped`. Don't work around either.
-- **Vitals are records.** Heart rate, oxygen and breathing rate are kept and charted with real axes. Miara never interprets them, and neither should your bridge: no "normal", no "concerning", no advice.
-- **Numbers and choices only.** No free text, no notes, nothing a person wrote.
-- **Be gentle.** 120 requests a minute per token, 500 rows and 4 MB a request. On a 429 the bridge waits `Retry-After` and resends. On a daily limit it stops and tells you; the next run picks up where it left off. On a 5xx it backs off and tries again, up to five times.
-- **Everything is the family's.** Anything you send shows in the log "via" your connection's name. They can undo all of it in one tap.
-
-## What the summary means
-
-| Word | Meaning |
-|---|---|
-| saved | New. |
-| updated | You sent a change to something you sent before. |
-| unchanged | Already there, same content. |
-| suggested | Overlaps a sleep a person logged. Waits for them. |
-| skipped | A person deleted it or answered its suggestion. Not brought back. |
-| rejected | Miara refused it. The reason is printed. |
+To take back everything this bridge wrote: in Miara, open the connection and tap **Undo everything it added**.
 
 ## Tests
 
 ```sh
-python -m unittest discover -s tests -t .              # no network
-MIARA_LIVE=1 python -m unittest tests.test_live_sandbox   # opt-in, uses the sandbox
+.venv/bin/python -m unittest                                       # offline
+MIARA_LIVE=1 .venv/bin/python -m unittest tests.test_live_sandbox  # against the public sandbox
 ```
-
-## With an agent
-
-`skills/miara-bridge/SKILL.md` is a skill that walks a coding agent through all of this: asking where your data comes from, writing `fetch` and `map`, testing on the sandbox, and scheduling. Copy the folder into your agent's skills directory.
 
 ## License
 
-MIT. © 2026 Noah Presler.
+MIT, like the template. `aionanit` is MIT too.

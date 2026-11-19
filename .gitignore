@@ -1,6 +1,8 @@
-# Your device login and Miara token. Never commit these.
+# Your Miara token and settings. Never commit these. (The Nanit session lives in ~/.config/nanit-bridge.)
 .env
 .env.*
+!.env.example
+bridge.log
 *.pem
 
 # Where the last sync time lives. It's yours, not the template's.

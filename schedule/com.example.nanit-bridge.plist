@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS: keep `bridge.py watch` running, and start it again if it stops or the Mac restarts.
+
+  1. Copy to ~/Library/LaunchAgents/com.example.nanit-bridge.plist
+  2. Change the three /Users/you/nanit-bridge paths.
+  3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.nanit-bridge.plist
+  Log:  tail -f ~/nanit-bridge/bridge.log
+  Stop: launchctl bootout gui/$(id -u)/com.example.nanit-bridge
+
+  launchd doesn't read .env, so the command loads it first.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.nanit-bridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-c</string>
+    <string>set -a; . ./.env; set +a; exec .venv/bin/python bridge.py watch</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/you/nanit-bridge</string>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/you/nanit-bridge/bridge.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/you/nanit-bridge/bridge.log</string>
+</dict>
+</plist>
