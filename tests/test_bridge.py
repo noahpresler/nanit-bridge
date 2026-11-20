@@ -115,6 +115,28 @@ class MapTests(unittest.TestCase):
         self.assertEqual(second[0]["ended_at"], "2026-11-18T11:50:00Z")  # duration, not the doubled net_duration
         self.assertFalse(bridge.is_asleep(state))
 
+    def test_nap_that_stirred_stays_open_until_the_feed_wakes(self):
+        # Nanit's calendar has the nap's first ten minutes as finished; the feed has no wake yet.
+        state = {}
+        piece = {"uid": "c1", "type": "auto_sleep", "time": ts(1), "duration": 631}
+        entries, _ = bridge.map([baby([ev("f1", "FELL_ASLEEP", ts(1))], [piece])], state, self.kids)
+        self.assertEqual(len(entries), 1)
+        self.assertNotIn("ended_at", entries[0])
+        self.assertEqual(entries[0]["started_at"], "2026-11-18T11:00:00Z")
+        self.assertTrue(bridge.is_asleep(state))
+        # The wake comes before Nanit writes the rest: the feed's wake ends it, not the old piece.
+        entries, _ = bridge.map([baby([ev("f1", "FELL_ASLEEP", ts(1)), ev("w", "WOKE_UP", ts(0, 15))], [piece])],
+                                state, self.kids)
+        self.assertEqual([e.get("ended_at") for e in entries], ["2026-11-18T11:45:00Z"])
+        self.assertFalse(bridge.is_asleep(state))
+
+    def test_open_sleep_over_an_older_piece_takes_the_calendar_end(self):
+        # A later sleep in the calendar means Nanit missed the wake: the open sleep doesn't swallow the day.
+        cal = [{"uid": "c1", "type": "auto_sleep", "time": ts(6), "duration": 3600},
+               {"uid": "c2", "type": "auto_sleep", "time": ts(2), "duration": 1800}]
+        entries, _ = bridge.map([baby([ev("f1", "FELL_ASLEEP", ts(6))], cal)], {}, self.kids)
+        self.assertTrue(all("ended_at" in e for e in entries))
+
     def test_wake_after_fell_asleep_scrolled_out_of_the_feed(self):
         state = {}
         bridge.map([baby([ev("f1", "FELL_ASLEEP", ts(9))])], state, self.kids)
