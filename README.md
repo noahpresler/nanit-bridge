@@ -3,8 +3,10 @@
 Sends your Nanit camera's sleeps to [Miara](https://getmiara.com) as they happen, with the nursery's temperature and humidity.
 
 - **Sleeps.** When Nanit sees the baby fall asleep, Miara shows a sleep that's still going. When Nanit sees them wake, the sleep gets its end. Once Nanit finishes its own record of that sleep, Miara takes Nanit's final times. It stays one entry the whole way through.
+- **What you log in the Nanit app.** Diapers (wet, dirty, mixed or dry), bottles (amount and formula or breast milk), nursing (each side's time), pumping, and naps typed in by hand. Change one in Nanit within two days and it changes in Miara too. Setup asks whether you want these. Log each one in one app, not both: Miara can't tell that a diaper logged twice is the same one.
 - **Room.** Temperature and humidity from the camera, every 10 minutes.
-- **Not sent:** Nanit's sleep scores, video, clips, photos, or anything logged in the Nanit app. Diapers and bottles stay where you log them.
+- **Not sent:** Nanit's sleep scores, video, clips, photos, who logged an entry and their comments. Solids, medicine, temperatures and growth can't come from a bridge yet.
+- **Deleted in Nanit:** a bridge can't delete in Miara. Delete it in Miara too.
 
 Built from the [miara-bridge](https://github.com/noahpresler/miara-bridge) template.
 
@@ -83,6 +85,7 @@ List each baby: `MIARA_CHILDREN=uidA=childA,uidB=childB`. One token can write to
 | `Nanit answered 4xx/5xx for /babies/…` | Nanit changed something or is down. The bridge keeps trying. Check [ha-nanit's issues](https://github.com/wealthystudent/ha-nanit/issues) for news. |
 | `doesn't know which Miara child` | Run `./install.sh` again. |
 | `Daily limit reached` | It waits and carries on. Nothing is lost: the next check sends the rest. |
+| `not read: … Nanit bottle_feed` | Nanit logged something in a way this bridge doesn't know. Run `python bridge.py probe` and open an issue with its output. |
 | No room readings | The camera is off or in sleep mode. Setting `NANIT_CAMERA_IP` (the camera's address on your network) can help. |
 
 `python bridge.py probe` prints the shape of what Nanit returns: field names and event types, with no times, names or values. Paste it into an issue if Nanit's answers change.

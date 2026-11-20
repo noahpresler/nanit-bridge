@@ -86,7 +86,7 @@ class GuideTests(unittest.TestCase):
         state = Path(self.tmp.name) / "state.json"
         no = Script("n")
         self.assertFalse(guide.check_and_send(no, "tok", {"*": CHILD}, state, http=FakeHttp(Resp(500)), nanit_client=n, now=T0))
-        self.assertIn("Nanit has 2 sleeps to add to Miara:", no.text())
+        self.assertIn("Nanit has 2 sleeps, 1 diaper to add to Miara:", no.text())
         self.assertIn("still asleep", no.text())
         self.assertIn("Nothing was sent.", no.text())
 
@@ -95,7 +95,7 @@ class GuideTests(unittest.TestCase):
                         Resp(200, {"saved": 2, "received": 2}))
         yes = Script("y")
         self.assertTrue(guide.check_and_send(yes, "tok", {"*": CHILD}, state, http=http, nanit_client=n, now=T0))
-        self.assertIn("Added 2 sleeps.", yes.text())
+        self.assertIn("✓ Added", yes.text())
         self.assertTrue(state.exists())
 
     def test_background_service_runs_watch_from_this_folder(self):

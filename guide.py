@@ -196,16 +196,51 @@ def local(at: str) -> datetime:
     return bridge.parse_time(at).astimezone()
 
 
+NOUN = {"sleep": ("sleep", "sleeps"), "diaper": ("diaper", "diapers"), "bottle": ("bottle", "bottles"),
+        "nursing": ("nursing session", "nursing sessions"), "pump": ("pumping session", "pumping sessions")}
+
+
+def count(n: int, kind: str) -> str:
+    one, many = NOUN.get(kind, (kind, kind + "s"))
+    return f"{n} {one if n == 1 else many}"
+
+
 def describe(entry: dict) -> str:
     start = local(entry["started_at"])
     when = start.strftime("%a %-I:%M %p")
+    d = entry.get("details") or {}
+    kind = entry["kind"]
+    if kind == "diaper":
+        return f"{when}  diaper, {d['diaper']}"
+    if kind == "bottle":
+        return f"{when}  bottle, {d['volume_ml']:g} ml {d['contents'].replace('_', ' ')}"
+    if kind == "nursing":
+        return f"{when}  nursing, left {round(d['left_seconds'] / 60)} min, right {round(d['right_seconds'] / 60)} min"
+    if kind == "pump":
+        amount = d.get("total_ml") or (d.get("left_ml", 0) + d.get("right_ml", 0))
+        return f"{when}  pumping" + (f", {amount:g} ml" if amount else "")
     if not entry.get("ended_at"):
-        return f"{when}, still asleep"
+        return f"{when}  sleep, still asleep"
     end = local(entry["ended_at"])
     mins = round((end - start).total_seconds() / 60)
     length = f"{mins // 60} h {mins % 60} min" if mins >= 60 else f"{mins} min"
     end_txt = end.strftime("%-I:%M %p" if end.date() == start.date() else "%a %-I:%M %p")
-    return f"{when} to {end_txt}  ({length})"
+    return f"{when}  sleep to {end_txt} ({length})"
+
+
+def ask_about_logs(io: IO, env_file: Path) -> None:
+    current = os.environ.get("NANIT_INCLUDE_LOGS")
+    if current in ("0", "1") and io.yes(
+            "  Saved earlier: " + ("add" if current == "1" else "don't add")
+            + " what's logged in the Nanit app. Keep that?"):
+        bridge.INCLUDE_NANIT_LOGS = current == "1"
+        return
+    on = io.yes("  Also add what you log by hand in the Nanit app (diapers, bottles, nursing, pumping, naps)?")
+    if on:
+        io.out("  Log each one in one app, not both: Miara can't tell that a diaper logged twice is the same one.")
+    bridge.write_env_value("NANIT_INCLUDE_LOGS", "1" if on else "0", env_file)
+    os.environ["NANIT_INCLUDE_LOGS"] = "1" if on else "0"
+    bridge.INCLUDE_NANIT_LOGS = on
 
 
 async def preview(children: dict, state: dict, now: datetime, n=None):
@@ -220,19 +255,26 @@ async def preview(children: dict, state: dict, now: datetime, n=None):
         return await read(real)
 
 
-def check_and_send(io: IO, token: str, children: dict, state_path: Path, http=None, nanit_client=None, now=None) -> bool:
+def check_and_send(io: IO, token: str, children: dict, state_path: Path, http=None, nanit_client=None, now=None,
+                   env_file: Path | None = None) -> bool:
     step(io, 4, "Check, then start")
     now = now or datetime.now(timezone.utc)
     state = bridge.load_state(state_path)
+    if env_file is not None:
+        ask_about_logs(io, env_file)
     io.out("  Reading the last two days from Nanit…")
     entries, readings = asyncio.run(preview(children, state, now, nanit_client))
-    sleeps = [e for e in entries if e["kind"] == "sleep"]
-    if sleeps:
-        io.out(f"  Nanit has {len(sleeps)} sleep{'s' if len(sleeps) != 1 else ''} to add to Miara:")
-        for e in sorted(sleeps, key=lambda e: e["started_at"]):
+    if entries:
+        kinds: dict[str, int] = {}
+        for e in entries:
+            kinds[e["kind"]] = kinds.get(e["kind"], 0) + 1
+        io.out("  Nanit has " + ", ".join(count(n, k) for k, n in kinds.items()) + " to add to Miara:")
+        for e in sorted(entries, key=lambda e: e["started_at"]):
             io.out(f"    {describe(e)}")
     else:
-        io.out("  Nanit has no new sleeps from the last two days. New ones will come in as they happen.")
+        io.out("  Nothing new in Nanit from the last two days. New sleeps and logs will come in as they happen.")
+    for label, n in (state.get("unread_logs") or {}).items():
+        io.out(f"  Not added: {n} Nanit {label} entr{'y' if n == 1 else 'ies'} this bridge can't read yet.")
     if readings:
         io.out("  And the nursery's temperature and humidity.")
     if entries or readings:
@@ -244,7 +286,7 @@ def check_and_send(io: IO, token: str, children: dict, state_path: Path, http=No
         bridge.save_state(state_path, state)
         e = summary["entries"]
         added = e.get("saved", 0) + e.get("updated", 0) + e.get("unchanged", 0)
-        done(io, f"Added {added} sleep{'s' if added != 1 else ''}." if sleeps else "Sent the room readings.")
+        done(io, f"Added {added} entr{'y' if added == 1 else 'ies'}." if entries else "Sent the room readings.")
         if e.get("suggested"):
             io.out(f"  {e['suggested']} overlapped a sleep someone already logged. Miara will ask which times to keep.")
         for status, sid, why in summary["reasons"]:
@@ -381,7 +423,7 @@ def run(io: IO | None = None, env_file: Path | None = None, state_path: Path | N
         babies = sign_in_to_nanit(io)
         token, kids = connect_miara(io, env_file)
         children = choose_children(io, babies, kids, env_file)
-        check_and_send(io, token, children, state_path)
+        check_and_send(io, token, children, state_path, env_file=env_file)
         keep_running(io)
     except (KeyboardInterrupt, EOFError):
         io.out("\n\nStopped. Run ./install.sh to pick up where you left off.")

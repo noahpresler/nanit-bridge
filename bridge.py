@@ -65,7 +65,8 @@ MAX_OPEN = timedelta(hours=16)
 # Room readings at most this often.
 ROOM_EVERY = timedelta(minutes=10)
 # Also send sleeps someone logged in the Nanit app. Off: if you log in Miara too, they'd overlap.
-INCLUDE_NANIT_LOGS = os.environ.get("NANIT_INCLUDE_LOGS", "") == "1"
+# Add what people log by hand in the Nanit app (diapers, bottles, nursing, pumping, naps). Setup asks.
+INCLUDE_NANIT_LOGS = os.environ.get("NANIT_INCLUDE_LOGS", "1") != "0"
 
 # watch: how long to wait between syncs.
 WATCH_ASLEEP = 60        # a sleep is open: catch the wake within a minute
@@ -160,6 +161,120 @@ def sleeps_from_calendar(calendar: list[dict]) -> list[dict]:
     return joined
 
 
+# ---------------------------------------------------------------------------
+# Logged in the Nanit app: diapers, bottles, nursing, pumping
+# ---------------------------------------------------------------------------
+
+OZ_ML = 29.5735
+LOG_KINDS = {"diaper_change": "diaper", "bottle_feed": "bottle", "bottle": "bottle", "nursing": "nursing",
+             "breastfeeding": "nursing", "breast_feeding": "nursing", "pumping": "pump", "pump": "pump"}
+NOT_FROM_BRIDGES = {"solids", "solid", "solid_food", "medication", "medicine", "temperature", "growth",
+                    "weight", "height", "head_circumference"}
+
+
+def _first(item: dict, *names: str):
+    for n in names:
+        v = item.get(n)
+        if v not in (None, ""):
+            return v
+    return None
+
+
+def _ml(item: dict, *amount_names: str) -> float | None:
+    amount = _first(item, *amount_names)
+    if amount is None:
+        return None
+    try:
+        amount = float(amount)
+    except (TypeError, ValueError):
+        return None
+    unit = str(_first(item, "unit", "units", "amount_unit", "volume_unit") or "ml").lower()
+    return round(amount * OZ_ML, 1) if unit.startswith("oz") or "ounce" in unit else round(amount, 1)
+
+
+def _seconds(item: dict, *names: str) -> float | None:
+    v = _first(item, *names)
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def diaper_details(item: dict) -> dict | None:
+    raw = str(_first(item, "change_type", "diaper_type", "kind_of_change") or "").lower()
+    pee = any(w in raw for w in ("pee", "wet", "urine"))
+    poo = any(w in raw for w in ("poo", "dirty", "stool", "bm"))
+    if raw in ("mixed", "both") or (pee and poo):
+        return {"diaper": "mixed"}
+    if poo:
+        return {"diaper": "dirty"}
+    if pee:
+        return {"diaper": "wet"}
+    if raw == "dry":
+        return {"diaper": "dry"}
+    return None
+
+
+def bottle_details(item: dict) -> dict | None:
+    ml = _ml(item, "amount", "volume", "quantity", "amount_ml", "volume_ml")
+    if not ml or not 0 < ml < 1000:
+        return None
+    what = str(_first(item, "content", "contents", "milk_type", "food_type", "bottle_type") or "").lower()
+    contents = ("mixed" if "mix" in what else "formula" if "formula" in what
+                else "breast_milk" if "breast" in what or "pumped" in what else None)
+    if contents is None:
+        return None
+    return {"volume_ml": ml, "contents": contents}
+
+
+def nursing_details(item: dict) -> dict | None:
+    left = _seconds(item, "left_duration", "left_seconds", "left_time", "left")
+    right = _seconds(item, "right_duration", "right_seconds", "right_time", "right")
+    if left is None and right is None:
+        total, side = _seconds(item, "duration"), str(item.get("side") or "").lower()
+        if total is None or side not in ("left", "right"):
+            return None
+        left, right = (total, 0) if side == "left" else (0, total)
+    return {"left_seconds": left or 0, "right_seconds": right or 0}
+
+
+def pump_details(item: dict) -> dict | None:
+    out = {}
+    for key, names in (("total_ml", ("amount", "volume", "total_amount", "total")),
+                       ("left_ml", ("left_amount", "left_volume")), ("right_ml", ("right_amount", "right_volume"))):
+        ml = _ml(item, *names)
+        if ml:
+            out[key] = ml
+    secs = _seconds(item, "duration", "duration_seconds")
+    if secs:
+        out["duration_seconds"] = secs
+    return out or None
+
+
+DETAILS = {"diaper": diaper_details, "bottle": bottle_details, "nursing": nursing_details, "pump": pump_details}
+
+
+def logs_from_calendar(baby_uid: str, calendar: list[dict], child: str) -> tuple[list[dict], dict]:
+    """Entries for what was logged in the Nanit app, and {type: count} of what couldn't be read."""
+    entries, unread = [], {}
+    for c in calendar:
+        t = str(c.get("type") or "")
+        if t in ("auto_sleep", "sleep") or c.get("time") is None or c.get("deleted_at"):
+            continue  # sleeps are handled with the camera's
+        kind = LOG_KINDS.get(t)
+        details = DETAILS[kind](c) if kind else None
+        if details is None:
+            label = t + (" (Miara can't take these from a bridge yet)" if t in NOT_FROM_BRIDGES else "")
+            unread[label] = unread.get(label, 0) + 1
+            continue
+        raw = {k: v for k, v in c.items() if k not in ("user", "comment", "baby_uid")}  # not who logged it, or free text
+        entries.append({"source_event_id": f"{SOURCE}:{baby_uid}:log:{c.get('uid') or int(float(c['time']))}",
+                        "kind": kind, "child_id": child,
+                        "started_at": iso(datetime.fromtimestamp(float(c["time"]), timezone.utc)),
+                        "details": details, "raw": raw})
+    return entries, unread
+
+
 def _overlaps(a_start, a_end, b_start, b_end) -> bool:
     far = datetime.max.replace(tzinfo=timezone.utc)
     return a_start < (b_end or far) and b_start < (a_end or far)
@@ -238,6 +353,12 @@ def map(items: list[dict], state: dict | None = None, children: dict | None = No
         else:
             state["open"].pop(uid, None)
 
+        if INCLUDE_NANIT_LOGS:
+            logs, unread = logs_from_calendar(uid, it.get("calendar", []), child)
+            entries.extend(logs)
+            for label, count in unread.items():
+                state.setdefault("unread_logs", {})[label] = count
+
         room = it.get("room") or {}
         minute = iso(parse_time(it["at"]).replace(second=0, microsecond=0))
         if room.get("celsius") is not None:
@@ -306,7 +427,7 @@ class SampleNanit:
                                ev("f7", "PUT_TO_SLEEP", t(0, 25))]}
         if path.endswith("/calendar"):
             return {"calendar": [{"uid": "c1", "type": "auto_sleep", "time": t(14), "duration": 10 * 3600},
-                                 {"uid": "c2", "type": "diaper_change", "time": t(3, 50)}]}
+                                 {"uid": "c2", "type": "diaper_change", "change_type": "pee", "time": t(3, 50)}]}
         return {}
 
     def room(self, baby) -> tuple[float, float]:
@@ -655,7 +776,11 @@ async def sync_once(n, client: Client | None, state: dict, children: dict, now: 
     entries, readings = map(items, state, children)
     entries, readings, problems = check(entries, readings, {d["metric"] for d in DECLARED_METRICS})
     if dry_run:
-        print(f"Read Nanit: {len(items)} baby(ies), {len(entries)} sleep(s), {len(readings)} reading(s) from the last "
+        kinds: dict[str, int] = {}
+        for e in entries:
+            kinds[e["kind"]] = kinds.get(e["kind"], 0) + 1
+        what = ", ".join(f"{n} {k}" for k, n in kinds.items()) or "no entries"
+        print(f"Read Nanit: {len(items)} baby(ies), {what}, {len(readings)} reading(s) from the last "
               f"{int(LOOKBACK.total_seconds() // 3600)} hours.")
         for e in entries:
             print("  entry  ", canonical(e))
@@ -663,6 +788,8 @@ async def sync_once(n, client: Client | None, state: dict, children: dict, now: 
             print("  reading", canonical(r))
         for sid, why in problems:
             print(f"  would reject: {sid}: {why}")
+        for label, count in (state.get("unread_logs") or {}).items():
+            print(f"  not read: {count} Nanit {label}. Run probe and open an issue with its output.")
         print("Dry run: nothing was sent.")
         return None
     summary = await asyncio.to_thread(send, client, None, entries, readings, state, iso(now))

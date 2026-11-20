@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -66,8 +67,8 @@ class MapTests(unittest.TestCase):
         n = bridge.SampleNanit(T0)
         items = [baby(n.get("/babies/x/events", {})["events"], n.get("/babies/x/calendar", {})["calendar"])]
         entries, _ = bridge.map(items, {}, self.kids)
-        self.assertEqual(len(entries), 2)
-        night, now = sorted(entries, key=lambda e: e["started_at"])
+        self.assertEqual(sorted(e["kind"] for e in entries), ["diaper", "sleep", "sleep"])
+        night, now = sorted((e for e in entries if e["kind"] == "sleep"), key=lambda e: e["started_at"])
         self.assertEqual((night["started_at"], night["ended_at"]), ("2026-11-17T22:00:00Z", "2026-11-18T08:00:00Z"))
         self.assertNotIn("ended_at", now)
         self.assertTrue(all(e["source_event_id"].startswith("nanit:b1:") and e["child_id"] == CHILD for e in entries))
@@ -126,9 +127,43 @@ class MapTests(unittest.TestCase):
         entries, _ = bridge.map(items, {}, {"b2": "child-2"})
         self.assertEqual([(e["child_id"], e["source_event_id"]) for e in entries], [("child-2", "nanit:b2:z")])
 
-    def test_nanit_logged_naps_are_left_out_unless_asked(self):
+    def test_nanit_logged_naps_are_left_out_when_switched_off(self):
         cal = [{"uid": "n1", "type": "sleep", "time": ts(5), "duration": 1800}]
-        self.assertEqual(bridge.sleeps_from_calendar(cal), [])
+        self.assertEqual(len(bridge.sleeps_from_calendar(cal)), 1)
+        with mock.patch.object(bridge, "INCLUDE_NANIT_LOGS", False):
+            self.assertEqual(bridge.sleeps_from_calendar(cal), [])
+            entries, _ = bridge.map([baby(calendar=[{"uid": "d", "type": "diaper_change", "change_type": "pee", "time": ts(1)}])],
+                                    {}, self.kids)
+            self.assertEqual(entries, [])
+
+    def test_what_was_logged_in_the_nanit_app(self):
+        cal = [
+            {"uid": "d1", "type": "diaper_change", "change_type": "dry", "time": ts(9), "user": {"name": "Pat"}, "comment": "x"},
+            {"uid": "d2", "type": "diaper_change", "change_type": "pee_and_poo", "time": ts(8)},
+            {"uid": "b1", "type": "bottle_feed", "amount": 4, "unit": "oz", "content": "formula", "time": ts(7)},
+            {"uid": "n1", "type": "nursing", "left_duration": 600, "right_duration": 300, "time": ts(6)},
+            {"uid": "p1", "type": "pumping", "amount": 120, "duration": 900, "time": ts(5)},
+            {"uid": "s1", "type": "solids", "time": ts(4)},
+            {"uid": "d3", "type": "diaper_change", "change_type": "dry", "time": ts(3), "deleted_at": "2026-11-18T10:00:00Z"},
+        ]
+        entries, unread = bridge.logs_from_calendar("b1", cal, CHILD)
+        self.assertEqual([(e["kind"], e["details"]) for e in entries], [
+            ("diaper", {"diaper": "dry"}), ("diaper", {"diaper": "mixed"}),
+            ("bottle", {"volume_ml": 118.3, "contents": "formula"}),
+            ("nursing", {"left_seconds": 600.0, "right_seconds": 300.0}),
+            ("pump", {"total_ml": 120.0, "duration_seconds": 900.0})])
+        self.assertEqual(entries[0]["source_event_id"], "nanit:b1:log:d1")
+        self.assertNotIn("user", entries[0]["raw"])  # who logged it stays in Nanit
+        self.assertNotIn("comment", entries[0]["raw"])
+        self.assertEqual(unread, {"solids (Miara can't take these from a bridge yet)": 1})
+        _, _, problems = bridge.check(entries, [], set())
+        self.assertEqual(problems, [])
+
+    def test_a_log_it_cannot_read_is_reported_not_guessed(self):
+        entries, unread = bridge.logs_from_calendar("b1", [
+            {"uid": "b2", "type": "bottle_feed", "time": ts(1)},  # no amount
+            {"uid": "x", "type": "diaper_change", "change_type": "something_new", "time": ts(1)}], CHILD)
+        self.assertEqual((entries, unread), ([], {"bottle_feed": 1, "diaper_change": 1}))
 
     def test_room_readings_rounded_to_the_minute(self):
         at = T0.replace(second=42)
@@ -363,7 +398,8 @@ class MainTests(unittest.TestCase):
     def ok_http(self):
         return FakeHttp(Resp(200, {"children": [{"id": CHILD}]}),
                         Resp(200, {"results": [{"source_event_id": "nanit:samplebaby:c1", "status": "saved"},
-                                               {"source_event_id": "nanit:samplebaby:f7", "status": "saved"}]}),
+                                               {"source_event_id": "nanit:samplebaby:f7", "status": "saved"},
+                                               {"source_event_id": "nanit:samplebaby:log:c2", "status": "saved"}]}),
                         Resp(200, {"saved": 2, "received": 2}))
 
     def test_sandbox_sends_made_up_data_then_nothing_twice(self):
@@ -371,7 +407,7 @@ class MainTests(unittest.TestCase):
             http = self.ok_http()
             self.assertEqual(self.run_main(["--sandbox"], http, tmp), 0)
             sent = http.calls[1]["body"]["entries"]
-            self.assertEqual(len(sent), 2)
+            self.assertEqual(sorted(e["kind"] for e in sent), ["diaper", "sleep", "sleep"])
             self.assertTrue(all(e["child_id"] == CHILD for e in sent))
             state = json.loads((Path(tmp) / "s.json").read_text())
             self.assertEqual(state["last_sync"], "2026-11-18T12:00:00Z")
