@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import store
+
 # aionanit warns on every camera retry; a camera that's off is reported once, as "no room readings".
 logging.getLogger("aionanit").setLevel(logging.ERROR)
 
@@ -40,14 +42,33 @@ def session_path() -> Path:
     return base / "nanit-bridge" / "session.json"
 
 
+SESSION_KEY = "session.json"
+
+
+def _blobs(path: Path | None):
+    """The Blob store, when running on Vercel and no file was asked for. None on a computer."""
+    return store.active() if path is None and not os.environ.get("NANIT_SESSION") else None
+
+
+def read_session_text(path: Path | None = None) -> str:
+    """The saved session as text. Raises FileNotFoundError when there isn't one."""
+    blobs = _blobs(path)
+    if blobs is not None:
+        raw = blobs.get(SESSION_KEY)
+        if raw is None:
+            raise FileNotFoundError(SESSION_KEY)
+        return raw.decode()
+    return (path or session_path()).read_text()
+
+
 def load_session(path: Path | None = None) -> dict:
-    path = path or session_path()
+    where = path or session_path()
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(read_session_text(path))
     except FileNotFoundError:
         raise NanitError("Not signed in to Nanit. Run: ./install.sh") from None
     except ValueError:
-        raise NanitError(f"{path} isn't readable. Run: ./install.sh") from None
+        raise NanitError(f"{where} isn't readable. Run: ./install.sh") from None
     if not data.get("refresh_token"):
         raise NanitError("The Nanit session has no refresh token. Run: ./install.sh")
     return data
@@ -55,6 +76,10 @@ def load_session(path: Path | None = None) -> dict:
 
 def save_session(data: dict, path: Path | None = None) -> None:
     """Write the session readable only by you, replacing the old one in one step."""
+    blobs = _blobs(path)
+    if blobs is not None:
+        blobs.put(SESSION_KEY, json.dumps(data).encode())
+        return
     path = path or session_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, stat.S_IRWXU)
@@ -79,7 +104,7 @@ class Nanit:
     """
 
     def __init__(self, session_file: Path | None = None, rest=None):
-        self.session_file = session_file or session_path()
+        self.session_file = session_file  # None: the default place (a file, or Blob on Vercel)
         self._rest_override = rest
         self._http = None
         self._client = None
@@ -114,7 +139,7 @@ class Nanit:
     def _tokens_refreshed(self, access_token: str, refresh_token: str) -> None:
         data = {"access_token": access_token, "refresh_token": refresh_token}
         try:
-            old = json.loads(self.session_file.read_text())
+            old = json.loads(read_session_text(self.session_file))
             data = {**old, **data}
         except (FileNotFoundError, ValueError):
             pass
@@ -215,3 +240,42 @@ async def setup(email: str, password: str, ask_code) -> list[Baby]:
         n._http, n._client = http, client
         client.token_manager.on_tokens_refreshed(n._tokens_refreshed)
         return await n.babies()
+
+
+async def sign_in(email: str, password: str, mfa_token: str | None = None, code: str | None = None) -> dict:
+    """Sign in one step at a time, for a web page that can't wait for a typed code.
+
+    First call (email, password): {"mfa_token": ...} when Nanit sent a code, else {"babies": [...]}.
+    Second call, with that mfa_token and the code: {"babies": [...]}. The session is saved on success.
+    The password is only passed along to Nanit; it is never kept.
+    """
+    import aiohttp
+    from aionanit import NanitAuthError, NanitClient, NanitMfaRequiredError
+
+    async with aiohttp.ClientSession() as http:
+        client = NanitClient(http)
+        try:
+            if mfa_token:
+                try:
+                    tokens = await client.async_verify_mfa(email, password, mfa_token, (code or "").strip())
+                except NanitAuthError:
+                    raise NanitError("Nanit didn't accept that code. Codes expire quickly: sign in again and use the newest one.") from None
+            else:
+                tokens = await client.async_login(email, password)
+        except NanitMfaRequiredError as mfa:
+            return {"mfa_token": mfa.mfa_token}
+        except NanitAuthError as exc:
+            raise NanitError(f"Nanit didn't accept that email and password ({exc}).") from None
+        save_session({"access_token": tokens["access_token"], "refresh_token": tokens["refresh_token"]})
+        n = Nanit()
+        n._http, n._client = http, client
+        client.token_manager.on_tokens_refreshed(n._tokens_refreshed)
+        return {"babies": await n.babies()}
+
+
+def forget_session(path: Path | None = None) -> None:
+    blobs = _blobs(path)
+    if blobs is not None:
+        blobs.delete(SESSION_KEY)
+    else:
+        (path or session_path()).unlink(missing_ok=True)

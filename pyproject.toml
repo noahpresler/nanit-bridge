@@ -1,0 +1,11 @@
+# Used by Vercel only. ./install.sh on a computer installs requirements.txt, which is all it needs.
+[project]
+name = "nanit-bridge"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = [
+  "requests>=2.31",
+  "aionanit==1.14.1",
+  "fastapi",
+  "vercel",
+]

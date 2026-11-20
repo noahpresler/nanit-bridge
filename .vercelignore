@@ -1,0 +1,6 @@
+tests/
+schedule/
+install.sh
+guide.py
+README.md
+.env*
