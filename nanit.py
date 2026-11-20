@@ -11,11 +11,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+# aionanit warns on every camera retry; a camera that's off is reported once, as "no room readings".
+logging.getLogger("aionanit").setLevel(logging.ERROR)
 
 API = "https://api.nanit.com"
 HEADERS = {"nanit-api-version": "1", "Accept": "application/json"}
@@ -41,11 +45,11 @@ def load_session(path: Path | None = None) -> dict:
     try:
         data = json.loads(path.read_text())
     except FileNotFoundError:
-        raise NanitError("Not signed in to Nanit. Run: python bridge.py setup") from None
+        raise NanitError("Not signed in to Nanit. Run: ./install.sh") from None
     except ValueError:
-        raise NanitError(f"{path} isn't readable. Run: python bridge.py setup") from None
+        raise NanitError(f"{path} isn't readable. Run: ./install.sh") from None
     if not data.get("refresh_token"):
-        raise NanitError("The Nanit session has no refresh token. Run: python bridge.py setup")
+        raise NanitError("The Nanit session has no refresh token. Run: ./install.sh")
     return data
 
 
@@ -132,7 +136,7 @@ class Nanit:
                     await tm.async_force_refresh(token)
                     continue
                 if resp.status == 401:
-                    raise NanitError("Nanit signed this bridge out. Run: python bridge.py setup")
+                    raise NanitError("Nanit signed this bridge out. Run: ./install.sh")
                 if resp.status == 429:
                     raise NanitError("Nanit is rate limiting this bridge. It will try again later.")
                 if resp.status >= 400:
@@ -203,7 +207,7 @@ async def setup(email: str, password: str, ask_code) -> list[Baby]:
             try:
                 tokens = await client.async_verify_mfa(email, password, mfa.mfa_token, code.strip())
             except NanitAuthError:
-                raise NanitError("Nanit didn't accept that code. Codes expire quickly: run setup again and use the newest one.") from None
+                raise NanitError("Nanit didn't accept that code. Codes expire quickly: run ./install.sh again and use the newest one.") from None
         except NanitAuthError as exc:
             raise NanitError(f"Nanit didn't accept that email and password ({exc}).") from None
         save_session({"access_token": tokens["access_token"], "refresh_token": tokens["refresh_token"]})

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import getpass
 import hashlib
 import json
 import os
@@ -28,7 +27,8 @@ from pathlib import Path
 
 import nanit
 
-ENV_FILE = Path(__file__).with_name(".env")
+HERE = Path(__file__).resolve().parent
+ENV_FILE = HERE / ".env"
 
 
 def load_env(path: Path = ENV_FILE) -> None:
@@ -733,26 +733,6 @@ async def watch(n, client: Client, state: dict, state_path: Path, children: dict
             print(f"{stamp()} Miara asked for fresh data.")
 
 
-def do_setup() -> int:
-    print("Sign in to Nanit. Your password is used once, here, and never saved: only the session Nanit gives back is,\n"
-          f"in {nanit.session_path()} (readable only by you).")
-    email = input("Nanit email: ").strip()
-    password = getpass.getpass("Nanit password: ")
-    try:
-        babies = asyncio.run(nanit.setup(email, password, lambda: input("Code Nanit sent you: ")))
-    except nanit.NanitError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    print("\nSigned in. Your Nanit babies:")
-    for b in babies:
-        print(f"  {b.uid}  {b.name or '(no name)'}{'' if b.camera_uid else '  (no camera)'}")
-    print("\nNext, tell the bridge which Miara child each baby is:\n"
-          "  1. In Miara: Profile → Siri, assistants and connections → New connection.\n"
-          "     Copy the token into .env as MIARA_TOKEN=... (cp .env.example .env first).\n"
-          "  2. Run: .venv/bin/python bridge.py link")
-    return 0
-
-
 def match_children(babies: list, kids: list[dict]) -> dict:
     """Nanit baby uid → Miara child id: by first name, or the only one of each."""
     kids = [k for k in kids if not k.get("history_only")]
@@ -773,31 +753,6 @@ def write_env_value(key: str, value: str, path: Path = ENV_FILE) -> None:
     lines.append(f"{key}={value}")
     path.write_text("\n".join(lines) + "\n")
     path.chmod(0o600)
-
-
-async def link(n, client: Client) -> int:
-    babies = await n.babies()
-    kids = client.request("GET", "/children").get("children", [])
-    if not kids:
-        raise BridgeError("This Miara token isn't for any child. Make a new one limited to your child.")
-    pairs = match_children(babies, kids)
-    names = {k["id"]: k.get("name") or k["id"] for k in kids}
-    for b in babies:
-        if b.uid in pairs:
-            print(f"  Nanit {b.name.strip() or b.uid} → Miara {names[pairs[b.uid]]}")
-        else:
-            print(f"  Nanit {b.name.strip() or b.uid} → no match. Its uid is {b.uid}.")
-    if len(pairs) < len(babies):
-        print("\nMiara children this token can write to:")
-        for k in kids:
-            print(f"  {k['id']}  {k.get('name') or ''}")
-        print("\nAdd the missing ones to .env yourself: MIARA_CHILDREN=<Nanit uid>=<Miara id>,...")
-    if not pairs:
-        return 1
-    value = ",".join(f"{u}={c}" for u, c in pairs.items())
-    write_env_value("MIARA_CHILDREN", value)
-    print(f"\nSaved MIARA_CHILDREN in {ENV_FILE.name}.\nNext, see what it would send: .venv/bin/python bridge.py --dry-run")
-    return 0
 
 
 def shape(value, depth: int = 0):
@@ -853,21 +808,48 @@ async def probe_raw(n, uid: str, now: int) -> None:
         print(f"  raw {label}: {json.dumps(shape(body))[:600]}")
 
 
+def status(guide) -> int:
+    state = load_state(HERE / "state.json")
+    last = state.get("last_sync")
+    if guide.running():
+        print("Running in the background.")
+    else:
+        print("Not running in the background. Start it with ./install.sh.")
+    if last:
+        mins = int((datetime.now(timezone.utc) - parse_time(last)).total_seconds() // 60)
+        print(f"Last checked Nanit {mins} min ago." if mins < 120 else f"Last checked Nanit {mins // 60} h ago.")
+    try:
+        tail = (HERE / "bridge.log").read_text().splitlines()[-5:]
+    except FileNotFoundError:
+        tail = []
+    if tail:
+        print("Latest from bridge.log:")
+        for line in tail:
+            print("  " + line)
+    return 0
+
+
 def main(argv: list[str] | None = None, http=None, sleep=time.sleep, now=None, nanit_rest=None) -> int:
     ap = argparse.ArgumentParser(description="Send a Nanit camera's sleeps and room readings to Miara.")
-    ap.add_argument("command", nargs="?", default="sync", choices=["sync", "watch", "setup", "probe", "link"])
+    ap.add_argument("command", nargs="?", default="sync", choices=["sync", "watch", "setup", "probe", "status", "stop"])
     ap.add_argument("--sandbox", action="store_true", help="made-up Nanit data into Miara's public sandbox family")
     ap.add_argument("--dry-run", action="store_true", help="read Nanit and print what would be sent; send nothing")
     ap.add_argument("--child", help="Miara child id for every Nanit baby (or set MIARA_CHILDREN)")
     ap.add_argument("--state", help="state file (default state.json, or state.sandbox.json with --sandbox)")
     args = ap.parse_args(argv)
 
-    if args.command == "setup":
-        return do_setup()
+    if args.command in ("setup", "status", "stop"):
+        import guide
+        if args.command == "setup":
+            return guide.run()
+        if args.command == "stop":
+            print("Stopped. It won't start again at login." if guide.stop_background() else "It wasn't running.")
+            return 0
+        return status(guide)
 
     base = os.environ.get("MIARA_BASE", DEFAULT_BASE)
     token = SANDBOX_TOKEN if args.sandbox else os.environ.get("MIARA_TOKEN", "")
-    state_path = Path(args.state or ("state.sandbox.json" if args.sandbox else "state.json"))
+    state_path = Path(args.state) if args.state else HERE / ("state.sandbox.json" if args.sandbox else "state.json")
     rest = nanit_rest or (SampleNanit(now) if args.sandbox else None)
 
     async def run() -> int:
@@ -878,17 +860,13 @@ def main(argv: list[str] | None = None, http=None, sleep=time.sleep, now=None, n
                 raise BridgeError("No Miara token. Make one in the app (Profile → Siri, assistants and connections → "
                                   "New connection), then put MIARA_TOKEN=... in .env. To try it without one, run with --sandbox.")
             client = Client(base, token, http=http, sleep=sleep) if token else None
-            if args.command == "link":
-                if client is None:
-                    raise BridgeError("No Miara token. Put MIARA_TOKEN=... in .env first (see python bridge.py setup).")
-                return await link(n, client)
             children = resolve_children(client, args.sandbox, args.child)
             state = load_state(state_path)
             if args.dry_run:
                 await sync_once(n, client, state, children, now or datetime.now(timezone.utc), dry_run=True)
                 return 0
             if not children:
-                raise BridgeError("The bridge doesn't know which Miara child to write to. Run: .venv/bin/python bridge.py link")
+                raise BridgeError("The bridge doesn't know which Miara child to write to. Run: ./install.sh")
             if args.command == "watch":
                 return await watch(n, client, state, state_path, children)
             await sync_once(n, client, state, children, now or datetime.now(timezone.utc))

@@ -13,69 +13,45 @@ Built from the [miara-bridge](https://github.com/noahpresler/miara-bridge) templ
 ## What you need
 
 - A Nanit camera with sleep tracking (Nanit Insights). Without it you get room readings only.
-- A computer that's always on: a Mac, a Raspberry Pi, a home server.
-- Python 3.10 or newer. The `python3` that comes with macOS is 3.9: get a newer one with `brew install python` or [uv](https://docs.astral.sh/uv/) (`uv venv -p 3.13 .venv && uv pip install -p .venv -r requirements.txt`).
-- A Miara token: in the app, **Profile → Siri, assistants and connections → New connection**, with `read`, `write:events` and `write:observations`, limited to the child or children this is for.
+- A computer that stays on: a Mac, a Raspberry Pi, a home server.
+- The Miara app, signed in to your family.
 
 ## Set it up
 
 ```sh
 git clone https://github.com/noahpresler/nanit-bridge.git
 cd nanit-bridge
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+./install.sh
 ```
 
-**1. Try it with made-up data.** This sends an invented baby's sleeps to Miara's public sandbox family. Nothing of yours is read or sent.
+It gets Python ready if this computer needs it, then walks you through four steps:
 
-```sh
-.venv/bin/python bridge.py --sandbox --dry-run   # shows what it would send
-.venv/bin/python bridge.py --sandbox             # sends it
-```
+1. **Sign in to Nanit.** Email, password, and the code Nanit sends you. The password is used once and never saved. What's saved is the sign-in Nanit gives back, in `~/.config/nanit-bridge/session.json`, readable only by you. That sign-in is full access to your Nanit account, so don't copy it anywhere. If you think it leaked, change your Nanit password and run `./install.sh` again.
+2. **Connect to Miara.** It tells you where to make a token in the app, then you paste it.
+3. **Choose the child.** It matches Nanit's baby to the Miara child of the same name, or asks.
+4. **Check, then start.** It shows the sleeps from the last two days and asks before adding them. Then it asks whether to keep running in the background (on a Mac it starts again at login).
 
-**2. Sign in to Nanit.**
+Run `./install.sh` again any time to change something. It keeps what's done and asks before changing it.
 
-```sh
-.venv/bin/python bridge.py setup
-```
+To try it first with made-up data, sending an invented baby's sleeps to Miara's public sandbox family: `.venv/bin/python bridge.py --sandbox --dry-run`.
 
-It asks for your Nanit email, password and the code Nanit sends you (use the newest one; they expire quickly). The password is used for this sign-in and never saved. What's saved is the session Nanit gives back, in `~/.config/nanit-bridge/session.json`, readable only by you. That session is full access to your Nanit account: don't copy it anywhere. If you think it leaked, change your Nanit password (that ends every session) and run `setup` again.
+## Once it's running
 
-**3. Connect your baby to Miara.** In the Miara app, make a token (**Profile → Siri, assistants and connections → New connection**, with `read`, `write:events` and `write:observations`, limited to your child). Then:
-
-```sh
-cp .env.example .env        # paste the token after MIARA_TOKEN=
-.venv/bin/python bridge.py link
-```
-
-`link` pairs each Nanit baby with the Miara child of the same first name (or the only one) and saves it in `.env`. If it can't tell, it lists both sides so you can write `MIARA_CHILDREN=<Nanit uid>=<Miara child id>` yourself.
-
-**4. See what it would send, then send it.**
-
-```sh
-.venv/bin/python bridge.py --dry-run
-.venv/bin/python bridge.py
-```
-
-The bridge reads `.env` itself. The first run sends the last two days.
-
-## Keep it running
-
-`bridge.py watch` stays running and checks Nanit:
-
-| When | How often |
+| When | It checks Nanit |
 |---|---|
 | A sleep is going on | every minute, so the wake shows up quickly |
 | Something happened in the last two hours | every 2 minutes |
 | Quiet | every 10 minutes |
 | Someone opens Miara | right away |
 
-Each check reads the last two days and sends only what changed, so most checks send nothing.
+Each check reads the last two days and sends only what changed.
 
-- **Mac:** `schedule/com.example.nanit-bridge.plist` (instructions inside). It starts at login and restarts if it stops.
-- **Linux:** `schedule/nanit-bridge.service`.
+```sh
+.venv/bin/python bridge.py status   # running? when did it last check?
+.venv/bin/python bridge.py stop     # stop it, and don't start at login
+```
 
-For a plain schedule instead (cron every few minutes): `.venv/bin/python bridge.py`.
+On Linux, `./install.sh` sets everything up except the background part: use `schedule/nanit-bridge.service`.
 
 ## How it decides what a sleep is
 
@@ -93,9 +69,9 @@ List each baby: `MIARA_CHILDREN=uidA=childA,uidB=childB`. One token can write to
 
 | You see | Do this |
 |---|---|
-| `Not signed in to Nanit` or `Nanit signed this bridge out` | Run `python bridge.py setup` again. |
+| `Not signed in to Nanit` or `Nanit signed this bridge out` | Run `./install.sh` again. |
 | `Nanit answered 4xx/5xx for /babies/…` | Nanit changed something or is down. The bridge keeps trying. Check [ha-nanit's issues](https://github.com/wealthystudent/ha-nanit/issues) for news. |
-| `No Miara child` | Set `MIARA_CHILDREN`. |
+| `doesn't know which Miara child` | Run `./install.sh` again. |
 | `Daily limit reached` | It waits and carries on. Nothing is lost: the next check sends the rest. |
 | No room readings | The camera is off or in sleep mode. Setting `NANIT_CAMERA_IP` (the camera's address on your network) can help. |
 
