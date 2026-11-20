@@ -14,8 +14,22 @@ Built from the [miara-bridge](https://github.com/noahpresler/miara-bridge) templ
 
 ## Pick where it runs
 
-- **On Vercel: free, no computer needed.** [Jump to the steps.](#on-vercel-free-no-computer-needed) It checks Nanit about every 15 minutes, so a wake can show up in Miara 15 to 30 minutes late. Vercel's free Hobby plan is for personal use, which this is.
-- **On a computer that stays on.** [Jump to the steps.](#on-a-computer-that-stays-on) It's live: every minute while the baby sleeps, and right away when someone opens Miara.
+The difference is how often it can look at Nanit. On a computer, the bridge keeps running and watches. On Vercel, it can't keep running: Vercel wakes it on a schedule, it checks once and stops. Vercel's free plan allows that at most every 15 minutes, and may start each check up to 15 minutes after its slot.
+
+| | [On Vercel](#on-vercel-free-no-computer-needed) | [On a computer that stays on](#on-a-computer-that-stays-on) |
+|---|---|---|
+| Cost | Free (Vercel's Hobby plan, for personal use) | Free, if you already have a Mac, Raspberry Pi or home server that's always on |
+| Setup | About 15 minutes in a web browser | About 10 minutes in a terminal |
+| Baby falls asleep | Shows in Miara 15 to 30 minutes later | Shows within a minute or two |
+| Baby wakes | Sleep ends in Miara 15 to 30 minutes later. Until then it still looks asleep. | Ends within a minute |
+| A nap shorter than about 15 minutes | Can arrive only once it's over, already finished | Shows while it happens |
+| Someone opens Miara | Nothing changes until the next check | Checks Nanit right away |
+| Room temperature and humidity | Every 15 to 30 minutes | Every 10 minutes |
+| Keeping it running | Nothing to do | The computer has to stay on and awake; after a power cut or restart, see [below](#through-restarts-and-power-cuts-mac) |
+
+The times on each sleep end up the same either way: once Nanit finishes its own record, Miara takes Nanit's times. Only how soon you see it changes. Pick Vercel if you mostly look back at the day. Pick a computer if you check Miara to see whether the baby is still asleep.
+
+You can start on Vercel and move to a computer later. Stop the Vercel one first (see **To stop it** under [On Vercel](#on-vercel-free-no-computer-needed)), so the two don't both send.
 
 Either way you need a Nanit camera with sleep tracking (Nanit Insights; without it you get room readings only) and the Miara app, signed in to your family.
 
