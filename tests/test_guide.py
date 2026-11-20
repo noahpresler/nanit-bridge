@@ -105,5 +105,45 @@ class GuideTests(unittest.TestCase):
         self.assertIn("<key>KeepAlive</key><true/>", text)
 
 
+class FakeRun:
+    """Answers pmset, defaults and fdesetup like a Mac with the given settings."""
+
+    def __init__(self, laptop=False, sleep="0", autorestart="1", auto_login=False, filevault=False):
+        self.out = {
+            "pmset -g batt": "Now drawing from 'AC Power'\n" + (" -InternalBattery-0 63%\n" if laptop else ""),
+            "pmset -g custom": f"AC Power:\n sleep                {sleep}\n autorestart          {autorestart}\n",
+            "fdesetup status": "FileVault is On." if filevault else "FileVault is Off.",
+        }
+        self.auto_login = auto_login
+
+    def __call__(self, args, capture_output=True, text=True):
+        key = " ".join(args)
+        code = 0
+        if args[0] == "defaults":
+            code = 0 if self.auto_login else 1
+        return type("R", (), {"returncode": code, "stdout": self.out.get(key, ""), "stderr": ""})()
+
+
+class AlwaysOnTests(unittest.TestCase):
+    def test_a_mac_mini_set_up_to_stay_on_needs_nothing(self):
+        self.assertEqual(guide.always_on_tips(FakeRun(auto_login=True)), [])
+
+    def test_a_mac_mini_that_sleeps_and_waits_for_login(self):
+        tips = guide.always_on_tips(FakeRun(sleep="10", autorestart="0"))
+        self.assertEqual(len(tips), 3)
+        self.assertIn("Energy, turn on \"Prevent automatic sleeping when the display is off\"", tips[0])
+        self.assertIn("Start up automatically after a power failure", tips[1])
+        self.assertIn("Automatically log in as", tips[2])
+
+    def test_filevault_means_log_in_after_a_restart(self):
+        tips = guide.always_on_tips(FakeRun(filevault=True))
+        self.assertEqual(len(tips), 1)
+        self.assertIn("sudo fdesetup authrestart", tips[0])
+
+    def test_a_laptop_only_hears_about_sleep(self):
+        self.assertEqual(guide.always_on_tips(FakeRun(laptop=True)), [])
+        self.assertIn("power adapter", guide.always_on_tips(FakeRun(laptop=True, sleep="15"))[0])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -53,6 +53,16 @@ Each check reads the last two days and sends only what changed.
 
 On Linux, `./install.sh` sets everything up except the background part: use `schedule/nanit-bridge.service`.
 
+### Through restarts and power cuts (Mac)
+
+On a Mac it starts again whenever you log in. For a Mac that's always on, like a Mac mini, setup and `status` check three things and tell you which to change:
+
+- **Sleep.** System Settings → Energy → turn on "Prevent automatic sleeping when the display is off".
+- **Power cuts.** System Settings → Energy → turn on "Start up automatically after a power failure".
+- **Logging in after a restart.** System Settings → Users & Groups → "Automatically log in as". With FileVault on, macOS can't log in by itself. Updates still unlock and come back on their own, and for a restart of your own, `sudo fdesetup authrestart` does the same. After any other restart, log in once and it carries on.
+
+After a restart, `.venv/bin/python bridge.py status` says whether it's running and when it last checked Nanit.
+
 ## How it decides what a sleep is
 
 - A sleep starts at Nanit's **fell asleep** (or **put down asleep**) and ends at its **woke up** (or **taken out asleep**).

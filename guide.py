@@ -302,6 +302,54 @@ def stop_background() -> bool:
     return was
 
 
+def _cmd(run, *args: str) -> tuple[int, str]:
+    try:
+        res = run(list(args), capture_output=True, text=True)
+    except (FileNotFoundError, OSError):
+        return 1, ""
+    return res.returncode, (res.stdout or "") + (res.stderr or "")
+
+
+def always_on_tips(run=subprocess.run) -> list[str]:
+    """What would stop this Mac running the bridge unattended, as plain steps. Empty if nothing."""
+    tips: list[str] = []
+    _, batt = _cmd(run, "pmset", "-g", "batt")
+    laptop = "InternalBattery" in batt
+    _, custom = _cmd(run, "pmset", "-g", "custom")
+    ac = custom.split("AC Power:", 1)[-1]
+    sleep = next((line.split()[1] for line in ac.splitlines() if line.split()[:1] == ["sleep"]), "0")
+    if sleep != "0":
+        tips.append("It sleeps when idle, and the bridge stops while it sleeps. In System Settings → "
+                    + ("Battery → Options, turn on \"Prevent automatic sleeping on power adapter when the display is off\"."
+                       if laptop else "Energy, turn on \"Prevent automatic sleeping when the display is off\"."))
+    if laptop:
+        return tips  # a laptop runs it whenever it's open and you're logged in; that's fine
+    autorestart = next((line.split()[1] for line in custom.splitlines() if line.split()[:1] == ["autorestart"]), "1")
+    if autorestart == "0":
+        tips.append("After a power cut it stays off. In System Settings → Energy, turn on "
+                    "\"Start up automatically after a power failure\".")
+    auto_login = _cmd(run, "defaults", "read", "/Library/Preferences/com.apple.loginwindow", "autoLoginUser")[0] == 0
+    filevault = "FileVault is On" in _cmd(run, "fdesetup", "status")[1]
+    if not auto_login:
+        if filevault:
+            tips.append("After a restart, it waits until you log in: FileVault needs your password first. "
+                        "macOS updates unlock it for you. For a restart of your own, run "
+                        "sudo fdesetup authrestart and it comes back on its own.")
+        else:
+            tips.append("After a restart, it waits until you log in. To start without you, in System Settings → "
+                        "Users & Groups, set \"Automatically log in as\" to you.")
+    return tips
+
+
+def show_tips(io: IO, tips: list[str]) -> None:
+    if not tips:
+        done(io, "This Mac is set to stay on and come back after a restart.")
+        return
+    io.out("  To keep it running without you:")
+    for t in tips:
+        io.out(f"    • {t}")
+
+
 def keep_running(io: IO) -> None:
     if platform.system() != "Darwin":
         io.out("\n  To keep it running on Linux, see schedule/nanit-bridge.service.\n"
@@ -310,6 +358,7 @@ def keep_running(io: IO) -> None:
     if running():
         start_in_background()  # pick up the new settings
         done(io, "It was already running in the background. Restarted it with these settings.")
+        show_tips(io, always_on_tips())
         return
     if not io.yes("\n  Keep it running in the background, so new sleeps show up on their own?"):
         io.out(f"  OK. Run it when you like: {sys.executable} {HERE / 'bridge.py'} watch")
@@ -317,6 +366,7 @@ def keep_running(io: IO) -> None:
     start_in_background()
     done(io, "Running. It starts again when you log in, and checks Nanit every minute while the baby sleeps.")
     io.out("  macOS may show a notice that a background item was added. That's this.")
+    show_tips(io, always_on_tips())
 
 
 # ---------------------------------------------------------------------------

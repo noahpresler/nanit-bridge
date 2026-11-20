@@ -813,9 +813,13 @@ def status(guide) -> int:
     state = load_state(HERE / "state.json")
     last = state.get("last_sync")
     if guide.running():
-        print("Running in the background.")
+        print("Running in the background. It starts again when you log in.")
     else:
         print("Not running in the background. Start it with ./install.sh.")
+    if sys.platform == "darwin":
+        tips = guide.always_on_tips()
+        for t in tips:
+            print(f"  • {t}")
     if last:
         mins = int((datetime.now(timezone.utc) - parse_time(last)).total_seconds() // 60)
         print(f"Last checked Nanit {mins} min ago." if mins < 120 else f"Last checked Nanit {mins // 60} h ago.")
