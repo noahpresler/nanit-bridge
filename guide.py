@@ -141,7 +141,7 @@ def connect_miara(io: IO, env_file: Path, http=None, sign_in=None) -> tuple[str,
 
 
 def sign_in_to_miara(io: IO, http=None) -> tuple[str, list[dict]]:
-    """Opens a Miara sign-in link (or prints it with a code and QR code) and waits for approval."""
+    """Opens Miara in the browser (or prints the link where none can open) and waits for approval."""
     client = bridge.Client(os.environ.get("MIARA_BASE", bridge.DEFAULT_BASE), "", http=http)
     say = lambda text: io.out("\n".join("  " + line for line in str(text).splitlines()))  # noqa: E731
     token, kids = link.connect(client, name="Nanit bridge", scopes=["write:events", "write:observations"], out=say)

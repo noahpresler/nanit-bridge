@@ -2,11 +2,11 @@
 
     python bridge.py setup
 
-asks Miara for a sign-in link, opens it in a browser when there is one, and always prints the
-link, a code and (with `segno` installed) a QR code, so it also works on a computer with no
-screen. Someone in the family opens the link, signs in to Miara, checks the code matches,
-chooses the children and approves. The bridge sees that within a few seconds and saves its
-token to .env as MIARA_TOKEN (and MIARA_CHILD_ID when there's one child).
+opens Miara in your browser, like `gh auth login`. You sign in, check the code matches the
+one in the terminal, choose the children and approve; the bridge sees that within a few
+seconds and saves its token to .env as MIARA_TOKEN (and MIARA_CHILD_ID when there's one
+child). Where no browser can open (over SSH, on a computer with no screen), it prints the
+link to open anywhere else.
 
 The token is made for this bridge and shown only to it. It shows in the Miara app under
 Profile like any connection, where it can be turned off, or everything it added undone.
@@ -50,19 +50,6 @@ def write_env_value(key: str, value: str, path: Path = ENV_FILE) -> None:
         out.append(f"{key}={value}")
     path.write_text("\n".join(out) + "\n")
     path.chmod(0o600)
-
-
-def qr(url: str) -> str | None:
-    """The link as a QR code in text, or None without segno (pip install segno)."""
-    try:
-        import io
-
-        import segno
-    except ImportError:
-        return None
-    buf = io.StringIO()
-    segno.make(url, error="m").terminal(out=buf, compact=True, border=2)
-    return buf.getvalue()
 
 
 def has_browser() -> bool:
@@ -109,14 +96,11 @@ def connect(client, name: str = "Device bridge", scopes: list[str] | None = None
         except Exception:
             opened = False
     if opened:
-        out(f"Opened Miara in your browser. Sign in and approve {name} there.\n")
-        out("No browser here? Open this on your phone:")
+        out(f"Opened Miara in your browser. Sign in, check the code is {code}, and approve {name}.")
+        out(f"If it didn't open, go to {url}")
     else:
-        out(f"Open this on your phone or computer, sign in to Miara and approve {name}:")
-    out(f"  {url}\n  Code: {code}")
-    picture = qr(url)
-    if picture:
-        out(picture)
+        out(f"Open this link in a browser, sign in to Miara and approve {name}:")
+        out(f"  {url}\n  Code: {code}")
     out(f"Waiting for you to approve… (the link lasts {int(link.get('expires_in', 600)) // 60} minutes)")
     status = wait(client, link, sleep=sleep, clock=clock)
     if status == "denied":
