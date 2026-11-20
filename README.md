@@ -12,13 +12,57 @@ Built from the [miara-bridge](https://github.com/noahpresler/miara-bridge) templ
 
 > **Unofficial.** Nanit has no public API. This uses the calls the Nanit app makes, as mapped by the [ha-nanit](https://github.com/wealthystudent/ha-nanit) project (it uses that project's `aionanit` library). Nanit can change them at any time, and this stops working until someone catches up. Nanit's terms may not allow it. Use it for your own account.
 
-## What you need
+## Pick where it runs
 
-- A Nanit camera with sleep tracking (Nanit Insights). Without it you get room readings only.
-- A computer that stays on: a Mac, a Raspberry Pi, a home server.
-- The Miara app, signed in to your family.
+- **On Vercel: free, no computer needed.** [Jump to the steps.](#on-vercel-free-no-computer-needed) It checks Nanit about every 15 minutes, so a wake can show up in Miara 15 to 30 minutes late. Vercel's free Hobby plan is for personal use, which this is.
+- **On a computer that stays on.** [Jump to the steps.](#on-a-computer-that-stays-on) It's live: every minute while the baby sleeps, and right away when someone opens Miara.
 
-## Set it up
+Either way you need a Nanit camera with sleep tracking (Nanit Insights; without it you get room readings only) and the Miara app, signed in to your family.
+
+## On Vercel: free, no computer needed
+
+> **Unofficial.** Nanit has no public API, and its terms may not allow this. It stops working whenever Nanit changes something. Use it for your own account only. (The full note is at the top of this page.)
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fnoahpresler%2Fnanit-bridge&project-name=nanit-bridge&repository-name=nanit-bridge&env=CRON_SECRET&envDescription=Make%20up%20a%20password%20of%2012%20or%20more%20characters.%20You%27ll%20type%20it%20on%20the%20setup%20page.&stores=%5B%7B%22type%22%3A%22blob%22%2C%22access%22%3A%22private%22%7D%5D)
+
+You'll need about 15 minutes, once. Everything happens in a web browser.
+
+1. **Make two free accounts**, if you don't have them. First [GitHub](https://github.com/signup). Then [Vercel](https://vercel.com/signup): choose **Continue with GitHub**, and pick the **Hobby** plan (the free one) when it asks.
+2. **Click the Deploy button above.** Vercel opens a page called "Create a Git Repository".
+3. **Fill in the first screen.** Leave **GitHub** chosen, and leave the repository name as `nanit-bridge`. Keep **Create private Git repository** on. Click **Create**.
+4. **Add the storage.** Vercel asks to create a **Blob** store. It's already set to private. Accept the name and region it suggests, and click **Create**, then **Connect** if it asks. This is where your sign-ins are kept, in your own Vercel account.
+5. **Choose your password.** Vercel asks for `CRON_SECRET`. Make up a password of 12 or more characters (a short sentence works well) and type it in. Save it somewhere safe: you'll type it on the setup page, and anyone who has it can see the bridge's status and change its setup. Click **Deploy**.
+6. **Wait about a minute** until Vercel shows "Congratulations!". Click the picture of the site, or **Continue to Dashboard** and then **Visit**. That's your setup page. Bookmark it.
+7. **Follow the four steps on the page.** Type your password first.
+   1. **Sign in to Nanit.** Your email and password, then the code Nanit sends you.
+   2. **Connect to Miara.** Click **Open Miara to approve**. In Miara, sign in, check that the code matches the one on the page, choose your child and approve. Come back to the page: it moves on by itself. (If that doesn't work, **Paste a token instead** is there.)
+   3. **Choose the child.** It matches Nanit's baby to the Miara child with the same name, or asks. It also asks whether to add what you log by hand in the Nanit app (diapers, bottles, nursing, pumping, naps). Log each one in one app, not both.
+   4. **Check, then start.** It shows the last two days from Nanit. Nothing has gone to Miara yet. Click **Add these and start**.
+8. **Check that it works.** After the next nap, wait up to 30 minutes, then open Miara. The sleep should be there. The setup page shows when it last checked and whether anything went wrong.
+
+**Where things are kept.** The Nanit sign-in and the Miara connection live in the private Blob store in your own Vercel account, and nowhere else. Your Nanit password is never saved. The password you chose in step 5 is the only thing standing between the setup page and anyone who finds its address, so make it a good one.
+
+**To update it** when the bridge changes: the clone Vercel makes in your GitHub is a copy, not a fork, so GitHub's "Sync fork" button isn't there. The simple way is to start over: delete the project (below), click the Deploy button again, and redo step 7, which takes a few minutes. If you're comfortable with a terminal, in a clone of your copy run `git pull https://github.com/noahpresler/nanit-bridge.git main`, then `git push`, and Vercel redeploys on its own.
+
+**To stop it:** in Vercel, open the project, then **Settings**, scroll to the bottom, and **Delete Project**. Or on the setup page, click **Disconnect**, which deletes the saved sign-ins and stops the checks. Then, in Miara, open the connection and tap **Undo everything it added** if you want the sleeps it added gone, and turn the connection off. To delete the Blob store too: Vercel, then **Storage**, open it, and delete it.
+
+| You see | Do this |
+|---|---|
+| The setup page says it's locked | `CRON_SECRET` is missing or shorter than 12 characters. In Vercel: your project, **Settings**, **Environment Variables**. Fix it, then **Deployments**, the top one, **Redeploy**. |
+| "That isn't the password you chose in Vercel" | Type `CRON_SECRET` exactly. It's in Vercel under **Settings**, **Environment Variables** (click the eye to show it). |
+| A Vercel login page appears instead of the setup page | Open the address that ends in `.vercel.app` shown under **Domains** in the project's **Settings**. Addresses of older deployments are private to you. |
+| Nanit says the code wasn't accepted | Codes expire in a minute or two. Sign in again and use the newest one. |
+| "The last check didn't work: Nanit signed this bridge out" | Open the setup page and click **Sign in to Nanit again**. |
+| "A check is running right now" | Wait a minute and try again. |
+| Nothing shows up in Miara | The page says when it last checked. If that's more than an hour ago, open the project in Vercel, then **Logs**. A check runs about every 15 minutes, and the first can take up to 30. |
+| The project's **Cron Jobs** list is empty | Redeploy. The schedule is set when a deployment is created. |
+
+Everything else in [When something goes wrong](#when-something-goes-wrong) applies here too.
+
+## On a computer that stays on
+
+You need a computer that stays on: a Mac, a Raspberry Pi, a home server.
+
 
 ```sh
 git clone https://github.com/noahpresler/nanit-bridge.git
@@ -37,7 +81,7 @@ Run `./install.sh` again any time to change something. It keeps what's done and 
 
 To try it first with made-up data, sending an invented baby's sleeps to Miara's public sandbox family: `.venv/bin/python bridge.py --sandbox --dry-run`.
 
-## Once it's running
+## Once it's running on a computer
 
 | When | It checks Nanit |
 |---|---|
@@ -46,7 +90,7 @@ To try it first with made-up data, sending an invented baby's sleeps to Miara's 
 | Quiet | every 10 minutes |
 | Someone opens Miara | right away |
 
-Each check reads the last two days and sends only what changed.
+Each check reads the last two days and sends only what changed. (On Vercel the schedule is one check about every 15 minutes, whatever is going on.)
 
 ```sh
 .venv/bin/python bridge.py status   # running? when did it last check?
@@ -95,7 +139,7 @@ To take back everything this bridge wrote: in Miara, open the connection and tap
 ## Tests
 
 ```sh
-.venv/bin/python -m unittest                                       # offline
+.venv/bin/python -m unittest                                       # offline (the Vercel tests need fastapi: pip install fastapi httpx)
 MIARA_LIVE=1 .venv/bin/python -m unittest tests.test_live_sandbox  # against the public sandbox
 ```
 

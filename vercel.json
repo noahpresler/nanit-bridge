@@ -1,0 +1,13 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "schedules": {
+    "sync": {
+      "schedule": "*/15 * * * *",
+      "path": "/api/sync",
+      "requestMethod": "GET"
+    }
+  },
+  "functions": {
+    "app.py": { "maxDuration": 300 }
+  }
+}
