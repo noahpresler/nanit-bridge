@@ -41,26 +41,23 @@ python3 -m venv .venv
 
 It asks for your Nanit email, password and the code Nanit sends you (use the newest one; they expire quickly). The password is used for this sign-in and never saved. What's saved is the session Nanit gives back, in `~/.config/nanit-bridge/session.json`, readable only by you. That session is full access to your Nanit account: don't copy it anywhere. If you think it leaked, change your Nanit password (that ends every session) and run `setup` again.
 
-Setup prints each Nanit baby's uid.
-
-**3. Connect each baby to a Miara child.** Copy `.env.example` to `.env` and fill it in:
+**3. Connect your baby to Miara.** In the Miara app, make a token (**Profile → Siri, assistants and connections → New connection**, with `read`, `write:events` and `write:observations`, limited to your child). Then:
 
 ```sh
-MIARA_TOKEN=miara_pat_...
-MIARA_CHILDREN=<Nanit uid>=<Miara child id>
+cp .env.example .env        # paste the token after MIARA_TOKEN=
+.venv/bin/python bridge.py link
 ```
 
-To find Miara child ids: `curl -s -H "Authorization: Bearer $MIARA_TOKEN" https://getmiara.com/api/v1/children`. A Nanit baby you don't list is left alone.
+`link` pairs each Nanit baby with the Miara child of the same first name (or the only one) and saves it in `.env`. If it can't tell, it lists both sides so you can write `MIARA_CHILDREN=<Nanit uid>=<Miara child id>` yourself.
 
 **4. See what it would send, then send it.**
 
 ```sh
-set -a; . ./.env; set +a
 .venv/bin/python bridge.py --dry-run
 .venv/bin/python bridge.py
 ```
 
-The first run sends the last two days.
+The bridge reads `.env` itself. The first run sends the last two days.
 
 ## Keep it running
 

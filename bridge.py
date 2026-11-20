@@ -28,6 +28,25 @@ from pathlib import Path
 
 import nanit
 
+ENV_FILE = Path(__file__).with_name(".env")
+
+
+def load_env(path: Path = ENV_FILE) -> None:
+    """Read KEY=value lines from .env into the environment, without replacing what's already set."""
+    try:
+        lines = path.read_text().splitlines()
+    except FileNotFoundError:
+        return
+    for line in lines:
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+if __name__ == "__main__":
+    load_env()
+
 DEFAULT_BASE = "https://getmiara.com/api/v1"
 SANDBOX_TOKEN = "miara_pat_5a4d0b0c5a4d0b0c5a4d0b0c5a4d0b0c5a4d0b0c"
 
@@ -727,8 +746,57 @@ def do_setup() -> int:
     print("\nSigned in. Your Nanit babies:")
     for b in babies:
         print(f"  {b.uid}  {b.name or '(no name)'}{'' if b.camera_uid else '  (no camera)'}")
-    print("\nNext: set MIARA_CHILDREN to <Nanit uid>=<Miara child id> for each (see README.md),\n"
-          "then try: python bridge.py --dry-run")
+    print("\nNext, tell the bridge which Miara child each baby is:\n"
+          "  1. In Miara: Profile → Siri, assistants and connections → New connection.\n"
+          "     Copy the token into .env as MIARA_TOKEN=... (cp .env.example .env first).\n"
+          "  2. Run: .venv/bin/python bridge.py link")
+    return 0
+
+
+def match_children(babies: list, kids: list[dict]) -> dict:
+    """Nanit baby uid → Miara child id: by first name, or the only one of each."""
+    kids = [k for k in kids if not k.get("history_only")]
+    first = lambda name: (name or "").split(" ")[0].strip().lower()  # noqa: E731
+    out = {}
+    for b in babies:
+        same = [k for k in kids if first(k.get("name")) and first(k.get("name")) == first(b.name)]
+        if len(same) == 1:
+            out[b.uid] = same[0]["id"]
+    if not out and len(babies) == 1 and len(kids) == 1:
+        out[babies[0].uid] = kids[0]["id"]
+    return out
+
+
+def write_env_value(key: str, value: str, path: Path = ENV_FILE) -> None:
+    lines = path.read_text().splitlines() if path.exists() else []
+    lines = [l for l in lines if not l.strip().startswith(key + "=")]
+    lines.append(f"{key}={value}")
+    path.write_text("\n".join(lines) + "\n")
+    path.chmod(0o600)
+
+
+async def link(n, client: Client) -> int:
+    babies = await n.babies()
+    kids = client.request("GET", "/children").get("children", [])
+    if not kids:
+        raise BridgeError("This Miara token isn't for any child. Make a new one limited to your child.")
+    pairs = match_children(babies, kids)
+    names = {k["id"]: k.get("name") or k["id"] for k in kids}
+    for b in babies:
+        if b.uid in pairs:
+            print(f"  Nanit {b.name.strip() or b.uid} → Miara {names[pairs[b.uid]]}")
+        else:
+            print(f"  Nanit {b.name.strip() or b.uid} → no match. Its uid is {b.uid}.")
+    if len(pairs) < len(babies):
+        print("\nMiara children this token can write to:")
+        for k in kids:
+            print(f"  {k['id']}  {k.get('name') or ''}")
+        print("\nAdd the missing ones to .env yourself: MIARA_CHILDREN=<Nanit uid>=<Miara id>,...")
+    if not pairs:
+        return 1
+    value = ",".join(f"{u}={c}" for u, c in pairs.items())
+    write_env_value("MIARA_CHILDREN", value)
+    print(f"\nSaved MIARA_CHILDREN in {ENV_FILE.name}.\nNext, see what it would send: .venv/bin/python bridge.py --dry-run")
     return 0
 
 
@@ -787,7 +855,7 @@ async def probe_raw(n, uid: str, now: int) -> None:
 
 def main(argv: list[str] | None = None, http=None, sleep=time.sleep, now=None, nanit_rest=None) -> int:
     ap = argparse.ArgumentParser(description="Send a Nanit camera's sleeps and room readings to Miara.")
-    ap.add_argument("command", nargs="?", default="sync", choices=["sync", "watch", "setup", "probe"])
+    ap.add_argument("command", nargs="?", default="sync", choices=["sync", "watch", "setup", "probe", "link"])
     ap.add_argument("--sandbox", action="store_true", help="made-up Nanit data into Miara's public sandbox family")
     ap.add_argument("--dry-run", action="store_true", help="read Nanit and print what would be sent; send nothing")
     ap.add_argument("--child", help="Miara child id for every Nanit baby (or set MIARA_CHILDREN)")
@@ -808,16 +876,19 @@ def main(argv: list[str] | None = None, http=None, sleep=time.sleep, now=None, n
                 return await probe(n)
             if not token and not args.dry_run:
                 raise BridgeError("No Miara token. Make one in the app (Profile → Siri, assistants and connections → "
-                                  "New connection), then set MIARA_TOKEN. To try it without one, run with --sandbox.")
+                                  "New connection), then put MIARA_TOKEN=... in .env. To try it without one, run with --sandbox.")
             client = Client(base, token, http=http, sleep=sleep) if token else None
+            if args.command == "link":
+                if client is None:
+                    raise BridgeError("No Miara token. Put MIARA_TOKEN=... in .env first (see python bridge.py setup).")
+                return await link(n, client)
             children = resolve_children(client, args.sandbox, args.child)
             state = load_state(state_path)
             if args.dry_run:
                 await sync_once(n, client, state, children, now or datetime.now(timezone.utc), dry_run=True)
                 return 0
             if not children:
-                raise BridgeError("No Miara child. Set MIARA_CHILDREN=<Nanit uid>=<Miara child id> (python bridge.py setup "
-                                  "lists the Nanit uids; GET /children lists the Miara ids this token can write to).")
+                raise BridgeError("The bridge doesn't know which Miara child to write to. Run: .venv/bin/python bridge.py link")
             if args.command == "watch":
                 return await watch(n, client, state, state_path, children)
             await sync_once(n, client, state, children, now or datetime.now(timezone.utc))

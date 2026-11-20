@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import bridge  # noqa: E402
+import nanit  # noqa: E402
 
 CHILD = "5a4d0b0c-0000-4000-8000-000000000011"
 
@@ -408,3 +409,29 @@ class MainTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LinkTests(unittest.TestCase):
+    def test_matches_by_first_name_or_the_only_pair(self):
+        B = nanit.Baby
+        kids = [{"id": "k1", "name": "Juniper (sample)"}, {"id": "k2", "name": "Basil (sample)"},
+                {"id": "k3", "name": "Old", "history_only": True}]
+        self.assertEqual(bridge.match_children([B("u1", "basil", "c")], kids), {"u1": "k2"})
+        self.assertEqual(bridge.match_children([B("u1", "Nursery", "c")], kids), {})
+        self.assertEqual(bridge.match_children([B("u1", "Nursery", "c")], kids[:1]), {"u1": "k1"})
+
+    def test_write_env_value_replaces_the_line_and_keeps_the_rest(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / ".env"
+            p.write_text("MIARA_TOKEN=t\nMIARA_CHILDREN=old\n")
+            bridge.write_env_value("MIARA_CHILDREN", "u1=k1", p)
+            self.assertEqual(p.read_text(), "MIARA_TOKEN=t\nMIARA_CHILDREN=u1=k1\n")
+            saved = dict(os.environ)
+            try:
+                os.environ["MIARA_TOKEN"] = "already set"
+                bridge.load_env(p)
+                self.assertEqual((os.environ["MIARA_TOKEN"], os.environ["MIARA_CHILDREN"]), ("already set", "u1=k1"))
+            finally:
+                os.environ.clear()
+                os.environ.update(saved)
