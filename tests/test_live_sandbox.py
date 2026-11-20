@@ -18,7 +18,7 @@ class LiveSandbox(unittest.TestCase):
         c = bridge.Client(base, bridge.SANDBOX_TOKEN)
         child = bridge.pick_sandbox_child(c)
         n = bridge.SampleNanit()
-        item = {"type": "baby", "uid": "samplebaby", "feed": n.get("/babies/x/feed", {})["feed"],
+        item = {"type": "baby", "uid": "samplebaby", "feed": n.get("/babies/x/events", {})["events"],
                 "calendar": n.get("/babies/x/calendar", {})["calendar"], "room": {"celsius": 21.4, "humidity": 46},
                 "at": bridge.iso(n.now)}
         entries, readings = bridge.map([item], {}, {"*": child})

@@ -82,8 +82,8 @@ For a plain schedule instead (cron every few minutes): `.venv/bin/python bridge.
 
 ## How it decides what a sleep is
 
-- A sleep starts at Nanit's **fell asleep** and ends at its **woke up**.
-- A wake shorter than 5 minutes doesn't end the sleep.
+- A sleep starts at Nanit's **fell asleep** (or **put down asleep**) and ends at its **woke up** (or **taken out asleep**).
+- A wake shorter than 5 minutes doesn't end the sleep, in the live entry or in Nanit's finished record, which splits a night at every wake.
 - When Nanit's own finished record arrives, usually soon after the wake, its times replace the live ones on the same entry.
 - If someone already logged that sleep in Miara, the bridge's version doesn't become a second entry. Miara asks them whether to use Nanit's times.
 - A sleep whose wake Nanit never reported is treated as over after 16 hours, and Nanit's finished record corrects it when it arrives.

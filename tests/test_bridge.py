@@ -63,7 +63,7 @@ class MapTests(unittest.TestCase):
 
     def test_sample_gives_last_night_finished_and_a_sleep_going_on(self):
         n = bridge.SampleNanit(T0)
-        items = [baby(n.get("/babies/x/feed", {})["feed"], n.get("/babies/x/calendar", {})["calendar"])]
+        items = [baby(n.get("/babies/x/events", {})["events"], n.get("/babies/x/calendar", {})["calendar"])]
         entries, _ = bridge.map(items, {}, self.kids)
         self.assertEqual(len(entries), 2)
         night, now = sorted(entries, key=lambda e: e["started_at"])
@@ -76,6 +76,22 @@ class MapTests(unittest.TestCase):
         self.assertEqual(len(bridge.sleeps_from_feed(feed)), 1)
         feed[2] = ev("c", "FELL_ASLEEP", ts(8, 30))
         self.assertEqual(len(bridge.sleeps_from_feed(feed)), 2)
+
+    def test_laid_down_asleep_and_lifted_out_asleep(self):
+        # Nanit's own order: PUT_TO_SLEEP starts a sleep with no FELL_ASLEEP; VISIT changes nothing.
+        feed = [ev("a", "PUT_TO_SLEEP", ts(10)), ev("v", "VISIT", ts(9)), ev("b", "WOKE_UP", ts(8)),
+                ev("c", "PUT_IN_BED", ts(5)), ev("d", "FELL_ASLEEP", ts(5)), ev("e", "REMOVED_ASLEEP", ts(3))]
+        at = lambda t: datetime.fromtimestamp(t, timezone.utc)  # noqa: E731
+        self.assertEqual([(s["start"], s["end"]) for s in bridge.sleeps_from_feed(feed)],
+                         [(at(ts(10)), at(ts(8))), (at(ts(5)), at(ts(3)))])
+
+    def test_calendar_pieces_split_by_a_brief_wake_are_one_sleep(self):
+        cal = [{"uid": "c1", "type": "auto_sleep", "time": ts(10), "duration": 50 * 60},
+               {"uid": "c2", "type": "auto_sleep", "time": ts(9, 8), "duration": 68 * 60},
+               {"uid": "c3", "type": "auto_sleep", "time": ts(6), "duration": 30 * 60}]
+        sleeps = bridge.sleeps_from_calendar(cal)
+        self.assertEqual([(s["key"], round((s["end"] - s["start"]).total_seconds() / 60)) for s in sleeps],
+                         [("c1", 120), ("c3", 30)])
 
     def test_motion_and_deleted_events_are_ignored(self):
         feed = [ev("a", "MOTION", ts(3)), dict(ev("b", "FELL_ASLEEP", ts(2)), deleted_at="2026-11-18T11:00:00Z")]

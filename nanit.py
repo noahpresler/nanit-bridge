@@ -21,7 +21,7 @@ API = "https://api.nanit.com"
 HEADERS = {"nanit-api-version": "1", "Accept": "application/json"}
 
 # Feed event keys that say where the baby is. Anything else (MOTION, SOUND, VISIT…) is ignored.
-SLEEP_KEYS = {"FELL_ASLEEP", "WOKE_UP", "PUT_IN_BED", "REMOVED", "LEAVING"}
+SLEEP_KEYS = {"FELL_ASLEEP", "PUT_TO_SLEEP", "WOKE_UP", "REMOVED_ASLEEP", "PUT_IN_BED", "REMOVED", "LEAVING"}
 
 
 class NanitError(Exception):
@@ -149,9 +149,13 @@ class Nanit:
         return out
 
     async def feed(self, baby_uid: str, start: int, end: int) -> list[dict]:
-        """Recent timeline items (Nanit returns about the 50 newest in the range)."""
-        body = await self.get(f"/babies/{baby_uid}/feed", {"start": int(start), "end": int(end), "items": 1000})
-        return body.get("feed") or body.get("items") or body.get("data") or []
+        """The camera's newest events (FELL_ASLEEP, WOKE_UP, VISIT…) between start and end.
+
+        Nanit's /events takes a count, not a range, so the range is applied here.
+        """
+        body = await self.get(f"/babies/{baby_uid}/events", {"limit": 200})
+        return [e for e in body.get("events") or []
+                if e.get("time") is not None and start <= float(e["time"]) <= end]
 
     async def calendar(self, baby_uid: str, start: int, end: int) -> list[dict]:
         """Finished sleeps (auto_sleep, sleep) and anything logged in the Nanit app."""

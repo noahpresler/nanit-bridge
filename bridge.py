@@ -80,21 +80,28 @@ async def fetch_async(n: nanit.Nanit, state: dict, now: datetime) -> list[dict]:
 # 2. map: Nanit's timeline into Miara sleeps and readings
 # ---------------------------------------------------------------------------
 
+STARTS = {"FELL_ASLEEP", "PUT_TO_SLEEP"}
+ENDS = {"WOKE_UP", "REMOVED_ASLEEP", "REMOVED"}
+
+
 def sleeps_from_feed(feed: list[dict], open_sleep: dict | None = None) -> list[dict]:
-    """FELL_ASLEEP / WOKE_UP pairs into sleeps: {"key", "start", "end" or None}.
+    """Nanit's events into sleeps: {"key", "start", "end" or None}.
+
+    A sleep starts at FELL_ASLEEP, or PUT_TO_SLEEP (laid down already asleep). It ends at
+    WOKE_UP, REMOVED_ASLEEP (lifted out still asleep), or REMOVED.
 
     A wake shorter than SHORT_WAKE joins the sleeps on either side. `open_sleep` is a sleep
-    still open at the end of the last sync, for a WOKE_UP whose FELL_ASLEEP has scrolled out
-    of Nanit's feed (it only returns about the 50 newest items).
+    still open at the end of the last sync, for a wake whose start has scrolled out of the
+    lookback window.
     """
-    events = sorted((e for e in feed if e.get("kind", "event") == "event" and e.get("key") in ("FELL_ASLEEP", "WOKE_UP")
+    events = sorted((e for e in feed if e.get("kind", "event") == "event" and e.get("key") in STARTS | ENDS
                      and not e.get("deleted_at") and e.get("time") is not None),
                     key=lambda e: float(e["time"]))
     sleeps: list[dict] = []
     cur = dict(open_sleep) if open_sleep else None
     for e in events:
         at = datetime.fromtimestamp(float(e["time"]), timezone.utc)
-        if e["key"] == "FELL_ASLEEP":
+        if e["key"] in STARTS:
             if cur and cur["end"] is None:
                 continue  # already asleep
             if cur and cur["end"] is not None and at - cur["end"] < SHORT_WAKE:
@@ -103,7 +110,7 @@ def sleeps_from_feed(feed: list[dict], open_sleep: dict | None = None) -> list[d
             if cur:
                 sleeps.append(cur)
             cur = {"key": str(e.get("uid") or int(float(e["time"]))), "start": at, "end": None}
-        else:  # WOKE_UP
+        else:  # WOKE_UP, REMOVED_ASLEEP, REMOVED
             if cur and cur["end"] is None and at > cur["start"]:
                 cur["end"] = at
     if cur:
@@ -122,7 +129,15 @@ def sleeps_from_calendar(calendar: list[dict]) -> list[dict]:
         # `duration` is the one to trust: `net_duration` has come back doubled.
         out.append({"key": str(c.get("uid") or int(float(c["time"]))), "start": start,
                     "end": start + timedelta(seconds=float(c["duration"]))})
-    return out
+    # Nanit splits a night at every wake, even a minute long. Join pieces closer than
+    # SHORT_WAKE, the same rule the live sleep follows, so the final entry matches it.
+    joined: list[dict] = []
+    for s in sorted(out, key=lambda s: s["start"]):
+        if joined and s["start"] - joined[-1]["end"] < SHORT_WAKE:
+            joined[-1]["end"] = max(joined[-1]["end"], s["end"])
+        else:
+            joined.append(dict(s))
+    return joined
 
 
 def _overlaps(a_start, a_end, b_start, b_end) -> bool:
@@ -264,11 +279,11 @@ class SampleNanit:
         t = lambda h, m=0: (n - timedelta(hours=h, minutes=m)).timestamp()  # noqa: E731
         if path == "/babies":
             return {"babies": [{"uid": "samplebaby", "name": "Sample", "camera_uid": "samplecam"}]}
-        if path.endswith("/feed"):
-            ev = lambda uid, key, at: {"kind": "event", "uid": uid, "key": key, "time": at}  # noqa: E731
-            return {"feed": [ev("f1", "PUT_IN_BED", t(14, 5)), ev("f2", "FELL_ASLEEP", t(14)), ev("f3", "WOKE_UP", t(12, 10)),
-                             ev("f4", "FELL_ASLEEP", t(12, 7)), ev("f5", "WOKE_UP", t(4)), ev("f6", "MOTION", t(3)),
-                             ev("f7", "FELL_ASLEEP", t(0, 25))]}
+        if path.endswith("/events"):
+            ev = lambda uid, key, at: {"uid": uid, "key": key, "time": at}  # noqa: E731
+            return {"events": [ev("f1", "PUT_IN_BED", t(14, 5)), ev("f2", "FELL_ASLEEP", t(14)), ev("f3", "WOKE_UP", t(12, 10)),
+                               ev("f4", "FELL_ASLEEP", t(12, 7)), ev("f5", "WOKE_UP", t(4)), ev("f6", "VISIT", t(3)),
+                               ev("f7", "PUT_TO_SLEEP", t(0, 25))]}
         if path.endswith("/calendar"):
             return {"calendar": [{"uid": "c1", "type": "auto_sleep", "time": t(14), "duration": 10 * 3600},
                                  {"uid": "c2", "type": "diaper_change", "time": t(3, 50)}]}
@@ -735,11 +750,11 @@ async def probe(n) -> int:
         feed = await n.feed(b.uid, now - 172800, now)
         keys: dict[str, int] = {}
         for e in feed:
-            k = f"{e.get('kind')}:{e.get('key') or e.get('type')}"
+            k = str(e.get('key') or e.get('type'))
             keys[k] = keys.get(k, 0) + 1
-        print(f"  feed: {len(feed)} items in 48 h: {keys}")
+        print(f"  events: {len(feed)} in 48 h: {keys}")
         if feed:
-            print("  feed item shape:", json.dumps(shape(feed[0])))
+            print("  event shape:", json.dumps(shape(feed[0])))
         cal = await n.calendar(b.uid, now - 172800, now)
         types: dict[str, int] = {}
         for c in cal:
@@ -748,9 +763,26 @@ async def probe(n) -> int:
         sleeps = [c for c in cal if c.get("type") == "auto_sleep"]
         if sleeps:
             print("  auto_sleep shape:", json.dumps(shape(sleeps[0])))
+        await probe_raw(n, b.uid, now)
         t, h = await n.room(b)
         print(f"  room: temperature {'yes' if t is not None else 'no'}, humidity {'yes' if h is not None else 'no'}")
     return 0
+
+
+async def probe_raw(n, uid: str, now: int) -> None:
+    """Ask Nanit the same things a few ways and print only the shape of each answer."""
+    day = 86400
+    tries = [
+        ("/calendar (ms)", f"/babies/{uid}/calendar", {"start": (now - 2 * day) * 1000, "end": now * 1000}),
+        ("/messages", f"/babies/{uid}/messages", {"limit": 20}),
+    ]
+    for label, path, params in tries:
+        try:
+            body = await n.get(path, params)
+        except Exception as err:  # noqa: BLE001 - a probe reports and moves on
+            print(f"  raw {label}: {str(err).split(':')[0]}")
+            continue
+        print(f"  raw {label}: {json.dumps(shape(body))[:600]}")
 
 
 def main(argv: list[str] | None = None, http=None, sleep=time.sleep, now=None, nanit_rest=None) -> int:
