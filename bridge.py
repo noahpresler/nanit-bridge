@@ -267,11 +267,15 @@ def logs_from_calendar(baby_uid: str, calendar: list[dict], child: str) -> tuple
             label = t + (" (Miara can't take these from a bridge yet)" if t in NOT_FROM_BRIDGES else "")
             unread[label] = unread.get(label, 0) + 1
             continue
-        raw = {k: v for k, v in c.items() if k not in ("user", "comment", "baby_uid")}  # not who logged it, or free text
-        entries.append({"source_event_id": f"{SOURCE}:{baby_uid}:log:{c.get('uid') or int(float(c['time']))}",
-                        "kind": kind, "child_id": child,
-                        "started_at": iso(datetime.fromtimestamp(float(c["time"]), timezone.utc)),
-                        "details": details, "raw": raw})
+        raw = {k: v for k, v in c.items() if k not in ("user", "comment", "baby_uid")}  # not who logged it; the note goes as a note
+        entry = {"source_event_id": f"{SOURCE}:{baby_uid}:log:{c.get('uid') or int(float(c['time']))}",
+                 "kind": kind, "child_id": child,
+                 "started_at": iso(datetime.fromtimestamp(float(c["time"]), timezone.utc)),
+                 "details": details, "raw": raw}
+        note = c.get("comment").strip() if isinstance(c.get("comment"), str) else ""
+        if note:
+            entry["note"] = note[:2000]  # what someone typed in the Nanit app; left out when there's none
+        entries.append(entry)
     return entries, unread
 
 

@@ -5,7 +5,7 @@ Sends your Nanit camera's sleeps to [Miara](https://getmiara.com) as they happen
 - **Sleeps.** When Nanit sees the baby fall asleep, Miara shows a sleep that's still going. When Nanit sees them wake, the sleep gets its end. Once Nanit finishes its own record of that sleep, Miara takes Nanit's final times. It stays one entry the whole way through.
 - **What you log in the Nanit app.** Diapers (wet, dirty, mixed or dry), bottles (amount and formula or breast milk), nursing (each side's time), pumping, and naps typed in by hand. Change one in Nanit within two days and it changes in Miara too. Setup asks whether you want these. Log each one in one app, not both: Miara can't tell that a diaper logged twice is the same one.
 - **Room.** Temperature and humidity from the camera, every 10 minutes.
-- **Not sent:** Nanit's sleep scores, video, clips, photos, who logged an entry and their comments. Solids, medicine, temperatures and growth can't come from a bridge yet.
+- **Not sent:** Nanit's sleep scores, video, clips, photos, or who logged an entry. A comment typed on an entry in the Nanit app comes across as the entry's note. Solids, medicine, temperatures and growth can't come from a bridge yet.
 - **Deleted in Nanit:** a bridge can't delete in Miara. Delete it in Miara too.
 
 Built from the [miara-bridge](https://github.com/noahpresler/miara-bridge) template.
