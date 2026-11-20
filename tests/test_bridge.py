@@ -155,6 +155,8 @@ class MapTests(unittest.TestCase):
         self.assertEqual(entries[0]["source_event_id"], "nanit:b1:log:d1")
         self.assertNotIn("user", entries[0]["raw"])  # who logged it stays in Nanit
         self.assertNotIn("comment", entries[0]["raw"])
+        self.assertEqual(entries[0]["note"], "x")
+        self.assertNotIn("Pat", str(entries[0]["raw"]))
         self.assertEqual(unread, {"solids (Miara can't take these from a bridge yet)": 1})
         _, _, problems = bridge.check(entries, [], set())
         self.assertEqual(problems, [])
