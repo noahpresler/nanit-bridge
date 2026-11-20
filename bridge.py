@@ -3,7 +3,8 @@
 
 Unofficial. Nanit has no public API; this uses the calls its app makes. See README.md.
 
-  python bridge.py setup               sign in to Nanit once (asks for the code Nanit sends you)
+  ./install.sh                         set up, step by step (runs `python bridge.py setup`)
+  python bridge.py status | stop       is it running in the background; stop it
   python bridge.py probe               show the shape of what Nanit returns (field names only)
   python bridge.py --dry-run           read Nanit, print what would be sent, send nothing
   python bridge.py                     one sync (for cron or launchd)
