@@ -395,10 +395,14 @@ def prune_known(state: dict, keep: timedelta, now: datetime | None = None) -> No
     sent = state.get("sent", {})
     for key in [k for k, v in sent.items() if parse_time(v.get("at", "1970-01-01T00:00:00Z")) < cutoff]:
         del sent[key]
+    kept = state.get("kept", {})
+    for sid in [s for s, v in kept.items() if parse_time(v.get("started_at") or "1970-01-01T00:00:00Z") < cutoff]:
+        del kept[sid]
 
 
 def is_asleep(state: dict) -> bool:
-    return bool(state.get("open"))
+    """A sleep is going on: Nanit has it open, and nobody has ended it in Miara."""
+    return any(not ended_in_miara(state, o.get("key")) for o in state.get("open", {}).values())
 
 
 def recently_active(state: dict, now: datetime, within: timedelta = timedelta(hours=2)) -> bool:
@@ -709,6 +713,7 @@ def send(client: Client, child_id: str | None, entries: list[dict], readings: li
                 summary["reasons"].append((status, r.get("source_event_id"), r.get("error") or _STATUS_WORDS[status]))
             if status != "rejected":
                 done.add(r.get("source_event_id"))
+            note_kept(r, state, summary)
         mark_sent([e for e in batch if e["source_event_id"] in done], state, entry_key, now)
     if readings:
         summary["declared"] = declare_metrics(client, readings, state)
@@ -720,6 +725,27 @@ def send(client: Client, child_id: str | None, entries: list[dict], readings: li
     summary["replayed"] = client.replayed - replayed_before
     summary["sent"] = len(entries) + len(readings)
     return summary
+
+
+def note_kept(result: dict, state: dict, summary: dict) -> None:
+    """Remember what someone changed in Miara (the result's `kept`), and say when a sleep joined a timer.
+
+    Later sends don't move a kept start, end or wakes back, so a sleep someone ended stays ended
+    however long Nanit keeps it open; is_asleep() reads this so the bridge stops treating it as open.
+    """
+    sid = result.get("source_event_id")
+    if result.get("joined"):
+        summary["reasons"].append(("joined", sid, "someone was timing this sleep in Miara; it joined their timer"))
+    if result.get("kept"):
+        state.setdefault("kept", {})[sid] = {
+            "fields": result["kept"], "started_at": result.get("started_at"), "ended_at": result.get("ended_at")}
+        summary["reasons"].append(("kept", sid, "someone changed " + ", ".join(result["kept"]) + " in Miara; that stays"))
+
+
+def ended_in_miara(state: dict, source_event_id: str) -> str | None:
+    """When someone ended this sleep in Miara: its end as Miara has it, else None."""
+    k = state.get("kept", {}).get(source_event_id)
+    return k["ended_at"] if k and "ended_at" in k["fields"] else None
 
 
 _STATUS_WORDS = {
