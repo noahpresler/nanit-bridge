@@ -216,6 +216,23 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(bridge.next_interval(recent, T0), bridge.WATCH_ACTIVE)
         self.assertEqual(bridge.next_interval({}, T0), bridge.WATCH_QUIET)
 
+    def test_a_sleep_ended_in_miara_is_not_watched_as_open(self):
+        # Nanit still has the nap open; someone ended it in Miara, and the result says so.
+        state = {"open": {"b1": {"key": "s:a", "start": "2026-11-18T11:00:00Z"}}}
+        http = FakeHttp(Resp(200, {"results": [{"source_event_id": "s:a", "status": "unchanged", "kept": ["ended_at"],
+                                                "started_at": "2026-11-18T11:00:00Z", "ended_at": "2026-11-18T11:40:00Z"}]}))
+        s = bridge.send(client(http), CHILD, [{"source_event_id": "s:a", "kind": "sleep", "started_at": "2026-11-18T11:00:00Z"}], [], state)
+        self.assertFalse(bridge.is_asleep(state))
+        self.assertEqual(bridge.ended_in_miara(state, "s:a"), "2026-11-18T11:40:00Z")
+        lines = []
+        bridge.print_summary(s, [], out=lines.append)
+        self.assertIn("kept: s:a: someone changed ended_at in Miara", "\n".join(lines))
+
+    def test_a_kept_start_leaves_the_sleep_open(self):
+        state = {"open": {"b1": {"key": "s:a", "start": "2026-11-18T11:00:00Z"}},
+                 "kept": {"s:a": {"fields": ["started_at"], "started_at": "2026-11-18T10:55:00Z", "ended_at": None}}}
+        self.assertTrue(bridge.is_asleep(state))
+
     def test_wait_returns_early_when_miara_asks(self):
         http = FakeHttp(Resp(200, {"woken": False}), Resp(200, {"woken": True}))
         out = bridge.asyncio.run(bridge.wait_for_next(client(http), 60, {}))
