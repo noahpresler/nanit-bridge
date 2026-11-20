@@ -29,7 +29,7 @@ cd nanit-bridge
 It gets Python ready if this computer needs it, then walks you through four steps:
 
 1. **Sign in to Nanit.** Email, password, and the code Nanit sends you. The password is used once and never saved. What's saved is the sign-in Nanit gives back, in `~/.config/nanit-bridge/session.json`, readable only by you. That sign-in is full access to your Nanit account, so don't copy it anywhere. If you think it leaked, change your Nanit password and run `./install.sh` again.
-2. **Connect to Miara.** It tells you where to make a token in the app, then you paste it.
+2. **Connect to Miara.** It opens a Miara page in your browser (or shows a link, a code and a QR code for your phone). Sign in, check the code, choose the child and approve. Pasting a token made in the app still works if that fails.
 3. **Choose the child.** It matches Nanit's baby to the Miara child of the same name, or asks.
 4. **Check, then start.** It shows the sleeps from the last two days and asks before adding them. Then it asks whether to keep running in the background (on a Mac it starts again at login).
 

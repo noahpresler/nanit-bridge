@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import bridge
+import link
 import nanit
 
 HERE = Path(__file__).resolve().parent
@@ -115,7 +116,7 @@ def miara_children(token: str, http=None) -> list[dict]:
     return [k for k in client.request("GET", "/children").get("children", []) if not k.get("history_only")]
 
 
-def connect_miara(io: IO, env_file: Path, http=None) -> tuple[str, list[dict]]:
+def connect_miara(io: IO, env_file: Path, http=None, sign_in=None) -> tuple[str, list[dict]]:
     step(io, 2, "Connect to Miara")
     token = os.environ.get("MIARA_TOKEN", "")
     if token:
@@ -124,12 +125,35 @@ def connect_miara(io: IO, env_file: Path, http=None) -> tuple[str, list[dict]]:
             if kids and io.yes(f"  Using the Miara connection saved earlier (it writes to {kid_names(kids)}). Keep it?"):
                 return token, kids
         except bridge.BridgeError:
-            io.out("  The Miara token saved earlier doesn't work any more. Make a new one.")
-    io.out("  In the Miara app:\n"
-           "    1. Open Profile → Siri, assistants and connections → New connection.\n"
-           "    2. Choose \"Choose what it can do\" and turn on all three: read, add entries, add readings.\n"
-           "    3. Name it Nanit. Under For, pick the child Nanit watches.\n"
-           "    4. Tap Create token, then copy it.")
+            io.out("  The Miara connection saved earlier doesn't work any more. Connect again.")
+    try:
+        token, kids = (sign_in or sign_in_to_miara)(io, http)
+    except (link.LinkError, bridge.BridgeError) as exc:
+        io.out(f"  Couldn't connect by signing in: {exc}")
+        return paste_token(io, env_file, http)
+    if not kids:
+        io.out("  That connection isn't for any child. Try again and choose your child.")
+        return paste_token(io, env_file, http)
+    bridge.write_env_value("MIARA_TOKEN", token, env_file)
+    os.environ["MIARA_TOKEN"] = token
+    done(io, f"Connected. It can write to {kid_names(kids)}.")
+    return token, kids
+
+
+def sign_in_to_miara(io: IO, http=None) -> tuple[str, list[dict]]:
+    """Opens a Miara sign-in link (or prints it with a code and QR code) and waits for approval."""
+    client = bridge.Client(os.environ.get("MIARA_BASE", bridge.DEFAULT_BASE), "", http=http)
+    say = lambda text: io.out("\n".join("  " + line for line in str(text).splitlines()))  # noqa: E731
+    token, kids = link.connect(client, name="Nanit bridge", scopes=["write:events", "write:observations"], out=say)
+    return token, [k for k in kids if not k.get("history_only")]
+
+
+def paste_token(io: IO, env_file: Path, http=None) -> tuple[str, list[dict]]:
+    """The fallback: a token made in the app, pasted here."""
+    io.out("  Or make a token in the Miara app:\n"
+           "    1. Open Profile → AI Assistants, Apps, & Devices → New connection.\n"
+           "    2. Choose \"A device bridge\". Name it Nanit. Under For, pick the child Nanit watches.\n"
+           "    3. Tap Create token, then copy it.")
     for attempt in range(3):
         token = io.secret("  Paste the token here (hidden as you paste), then press Return: ").strip()
         if not token.startswith("miara_pat_"):
@@ -147,7 +171,7 @@ def connect_miara(io: IO, env_file: Path, http=None) -> tuple[str, list[dict]]:
         os.environ["MIARA_TOKEN"] = token
         done(io, f"Connected. It can write to {kid_names(kids)}.")
         return token, kids
-    raise bridge.BridgeError("Couldn't connect to Miara. Run ./install.sh again with a new token.")
+    raise bridge.BridgeError("Couldn't connect to Miara. Run ./install.sh again.")
 
 
 def kid_names(kids: list[dict]) -> str:
