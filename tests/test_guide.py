@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -64,10 +65,27 @@ class GuideTests(unittest.TestCase):
                                         sign_in=lambda *a: self.fail("asked to sign in again"))
         self.assertEqual(len(babies), 1)
 
+    def test_connects_by_signing_in_to_miara(self):
+        tok = "miara_pat_" + "ab" * 20
+        http = FakeHttp(Resp(200, {"token": tok, "code": "WDJB-MJHT", "url": "https://getmiara.com/link?code=WDJB-MJHT",
+                                   "expires_in": 600, "interval": 3}),
+                        Resp(200, {"status": "approved"}), Resp(200, {"children": KIDS}))
+        io = Script()
+        with mock.patch.object(guide.link, "has_browser", return_value=False):
+            token, kids = guide.connect_miara(io, self.env, http=http)
+        self.assertEqual(token, tok)
+        self.assertEqual(http.calls[0]["body"], {"name": "Nanit bridge", "scopes": ["write:events", "write:observations"]})
+        self.assertIn("  Code: WDJB-MJHT", io.text())
+        self.assertIn(f"MIARA_TOKEN={tok}", self.env.read_text())
+        self.assertIn("Connected. It can write to", io.text())
+
     def test_miara_token_is_checked_then_saved(self):
+        def no_link(io, http):
+            raise guide.link.LinkError("The link ran out before anyone approved it.")
         http = FakeHttp(Resp(200, {"children": KIDS}))
         io = Script("not a token", "miara_pat_abc")
-        token, kids = guide.connect_miara(io, self.env, http=http)
+        token, kids = guide.connect_miara(io, self.env, http=http, sign_in=no_link)
+        self.assertIn("Couldn't connect by signing in: The link ran out", io.text())
         self.assertEqual(token, "miara_pat_abc")
         self.assertIn("It starts with miara_pat_", io.text())
         self.assertIn("MIARA_TOKEN=miara_pat_abc", self.env.read_text())
