@@ -286,6 +286,12 @@ def merge_sleeps(baby_uid: str, feed_sleeps: list[dict], cal_sleeps: list[dict],
     A sleep keeps the source_event_id it was first sent with (from `known`: sid -> [start, end]),
     so the live entry made at FELL_ASLEEP is the one that gets its end and Nanit's final times.
     The calendar's finished sleep wins on times; the feed fills in a sleep still going on.
+
+    Nanit's calendar writes each piece of a sleep as it closes, so a nap that stirred and went
+    on shows there as finished while the feed has no wake yet. A sleep the feed says is still
+    going stays open over the calendar's newest piece, and only the feed's wake (or a person in
+    Miara) ends it. Over an older piece it doesn't: a later sleep in the calendar means Nanit
+    missed the wake, and the calendar's end is the better guess.
     """
     out: dict[str, dict] = {}
 
@@ -308,9 +314,15 @@ def merge_sleeps(baby_uid: str, feed_sleeps: list[dict], cal_sleeps: list[dict],
             o["start"], o["end"] = min(o["start"], s["start"]), max(o["end"], s["end"])
         else:
             out[sid] = {"start": s["start"], "end": s["end"], "from": "calendar"}
+    newest_end = max((s["end"] for s in cal_sleeps), default=None)
     for s in feed_sleeps:
         sid = claim(s)
         if sid in out:
+            o = out[sid]
+            if s["end"] is None and o["end"] == newest_end:
+                o["start"], o["end"], o["from"] = min(o["start"], s["start"]), None, "feed"
+            elif s["end"] is not None and s["end"] - o["end"] > SHORT_WAKE:
+                o["end"] = s["end"]  # the calendar hasn't written the rest of the sleep yet
             continue  # the calendar already has it, finished
         out[sid] = {"start": s["start"], "end": s["end"], "from": "feed"}
     return [{"sid": sid, **v} for sid, v in out.items()]
