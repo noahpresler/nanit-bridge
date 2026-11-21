@@ -130,6 +130,32 @@ class MapTests(unittest.TestCase):
         self.assertEqual([e.get("ended_at") for e in entries], ["2026-11-18T11:45:00Z"])
         self.assertFalse(bridge.is_asleep(state))
 
+    def test_a_piece_just_closed_stays_open_while_the_feed_is_late(self):
+        # 2026-11-20: the calendar closed a nap's first 9 minutes; the feed's FELL_ASLEEP came 15 minutes late.
+        piece = {"uid": "c1", "type": "auto_sleep", "time": ts(0, 30), "duration": 540}  # 11:30 to 11:39
+        state = {}
+        entries, _ = bridge.map([baby([], [piece], at=T0 - bridge.timedelta(minutes=16))], state, self.kids)
+        self.assertNotIn("ended_at", entries[0])
+        self.assertTrue(bridge.is_asleep(state))
+        # The feed catches up: still asleep, the same entry.
+        entries, _ = bridge.map([baby([ev("f1", "FELL_ASLEEP", ts(0, 30))], [piece])], state, self.kids)
+        self.assertEqual(len(entries), 1)
+        self.assertNotIn("ended_at", entries[0])
+
+    def test_a_short_nap_ends_at_the_calendar_end_once_the_lag_has_passed(self):
+        piece = {"uid": "c1", "type": "auto_sleep", "time": ts(0, 40), "duration": 540}  # 11:20 to 11:29
+        state = {}
+        bridge.map([baby([], [piece], at=T0 - bridge.timedelta(minutes=25))], state, self.kids)
+        entries, _ = bridge.map([baby([], [piece])], state, self.kids)  # 31 minutes after: nothing from the feed
+        self.assertEqual([e.get("ended_at") for e in entries], ["2026-11-18T11:29:00Z"])
+        self.assertFalse(bridge.is_asleep(state))
+
+    def test_a_piece_just_closed_with_the_feeds_wake_is_over(self):
+        piece = {"uid": "c1", "type": "auto_sleep", "time": ts(0, 30), "duration": 540}
+        feed = [ev("f1", "FELL_ASLEEP", ts(0, 30)), ev("w", "WOKE_UP", ts(0, 21))]
+        entries, _ = bridge.map([baby(feed, [piece], at=T0 - bridge.timedelta(minutes=16))], {}, self.kids)
+        self.assertEqual([e.get("ended_at") for e in entries], ["2026-11-18T11:39:00Z"])
+
     def test_open_sleep_over_an_older_piece_takes_the_calendar_end(self):
         # A later sleep in the calendar means Nanit missed the wake: the open sleep doesn't swallow the day.
         cal = [{"uid": "c1", "type": "auto_sleep", "time": ts(6), "duration": 3600},
