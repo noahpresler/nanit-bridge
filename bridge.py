@@ -60,6 +60,9 @@ DECLARED_METRICS: list[dict] = []
 LOOKBACK = timedelta(hours=48)
 # A wake shorter than this doesn't end a sleep (a stir, a resettle).
 SHORT_WAKE = timedelta(minutes=5)
+# Nanit's feed posts FELL_ASLEEP and WOKE_UP up to ~17 minutes late. A sleep the calendar has just
+# closed stays open this long, unless the feed has its wake, in case it's a stir the feed hasn't caught.
+FEED_LAG = timedelta(minutes=20)
 # A sleep whose wake we never saw is treated as over after this long.
 MAX_OPEN = timedelta(hours=16)
 # Room readings at most this often.
@@ -284,7 +287,8 @@ def _overlaps(a_start, a_end, b_start, b_end) -> bool:
     return a_start < (b_end or far) and b_start < (a_end or far)
 
 
-def merge_sleeps(baby_uid: str, feed_sleeps: list[dict], cal_sleeps: list[dict], known: dict) -> list[dict]:
+def merge_sleeps(baby_uid: str, feed_sleeps: list[dict], cal_sleeps: list[dict], known: dict,
+                 now: datetime | None = None) -> list[dict]:
     """One Miara entry per real sleep, whichever Nanit list it came from.
 
     A sleep keeps the source_event_id it was first sent with (from `known`: sid -> [start, end]),
@@ -296,6 +300,10 @@ def merge_sleeps(baby_uid: str, feed_sleeps: list[dict], cal_sleeps: list[dict],
     going stays open over the calendar's newest piece, and only the feed's wake (or a person in
     Miara) ends it. Over an older piece it doesn't: a later sleep in the calendar means Nanit
     missed the wake, and the calendar's end is the better guess.
+
+    The feed is itself up to ~17 minutes late, so a piece the calendar closed less than FEED_LAG
+    before `now` stays open too, unless the feed already has its wake. If the feed's FELL_ASLEEP
+    and wake never come, the calendar's end stands once FEED_LAG has passed.
     """
     out: dict[str, dict] = {}
 
@@ -319,16 +327,23 @@ def merge_sleeps(baby_uid: str, feed_sleeps: list[dict], cal_sleeps: list[dict],
         else:
             out[sid] = {"start": s["start"], "end": s["end"], "from": "calendar"}
     newest_end = max((s["end"] for s in cal_sleeps), default=None)
+    woke: set[str] = set()
     for s in feed_sleeps:
         sid = claim(s)
         if sid in out:
             o = out[sid]
+            if s["end"] is not None:
+                woke.add(sid)
             if s["end"] is None and o["end"] == newest_end:
                 o["start"], o["end"], o["from"] = min(o["start"], s["start"]), None, "feed"
             elif s["end"] is not None and s["end"] - o["end"] > SHORT_WAKE:
                 o["end"] = s["end"]  # the calendar hasn't written the rest of the sleep yet
             continue  # the calendar already has it, finished
         out[sid] = {"start": s["start"], "end": s["end"], "from": "feed"}
+    if now is not None and newest_end is not None and now - newest_end < FEED_LAG:
+        for sid, o in out.items():
+            if o["from"] == "calendar" and o["end"] == newest_end and sid not in woke:
+                o["end"], o["from"] = None, "held"  # maybe a stir: wait for the feed to catch up
     return [{"sid": sid, **v} for sid, v in out.items()]
 
 
@@ -350,10 +365,12 @@ def map(items: list[dict], state: dict | None = None, children: dict | None = No
             continue  # a Nanit baby you didn't connect to a Miara child
         known = state.setdefault("sleeps", {}).setdefault(uid, {})
         open_prev = state.setdefault("open", {}).get(uid)
+        if open_prev and open_prev.get("held"):
+            open_prev = None  # held only for the feed's lag: the feed never had it open
         if open_prev:
             open_prev = {"key": open_prev["key"], "start": parse_time(open_prev["start"]), "end": None}
         feed_sleeps = sleeps_from_feed(it.get("feed", []), open_prev)
-        merged = merge_sleeps(uid, feed_sleeps, sleeps_from_calendar(it.get("calendar", [])), known)
+        merged = merge_sleeps(uid, feed_sleeps, sleeps_from_calendar(it.get("calendar", [])), known, parse_time(it["at"]))
         still_open = None
         for s in merged:
             e = {"source_event_id": s["sid"], "kind": "sleep", "child_id": child,
@@ -362,6 +379,8 @@ def map(items: list[dict], state: dict | None = None, children: dict | None = No
                 e["ended_at"] = iso(s["end"])
             else:
                 still_open = {"key": s["sid"], "start": iso(s["start"])}
+                if s["from"] == "held":
+                    still_open["held"] = True
             entries.append(e)
             known[s["sid"]] = [iso(s["start"]), iso(s["end"]) if s["end"] else None]
         if still_open:
