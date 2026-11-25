@@ -242,6 +242,20 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(bridge.next_interval(recent, T0), bridge.WATCH_ACTIVE)
         self.assertEqual(bridge.next_interval({}, T0), bridge.WATCH_QUIET)
 
+    def test_put_in_bed_is_watched_every_minute_until_asleep_or_out(self):
+        state = {}
+        bridge.map([baby([ev("w", "WOKE_UP", ts(5)), ev("p", "PUT_IN_BED", ts(0, 10))])], state, {"b1": CHILD})
+        self.assertEqual(bridge.next_interval(state, T0), bridge.WATCH_ASLEEP)
+        # A missed REMOVED doesn't keep it at a minute for good.
+        self.assertNotEqual(bridge.next_interval(state, T0 + bridge.SETTLE_WINDOW), bridge.WATCH_ASLEEP)
+        # Taken out again: back to the usual pace.
+        bridge.map([baby([ev("p", "PUT_IN_BED", ts(0, 10)), ev("r", "REMOVED", ts(0, 5))])], state, {"b1": CHILD})
+        self.assertEqual(state["settling"], {})
+        # Asleep: the open sleep takes over.
+        bridge.map([baby([ev("p", "PUT_IN_BED", ts(0, 10)), ev("f", "FELL_ASLEEP", ts(0, 5))])], state, {"b1": CHILD})
+        self.assertEqual(state["settling"], {})
+        self.assertEqual(bridge.next_interval(state, T0), bridge.WATCH_ASLEEP)
+
     def test_a_sleep_ended_in_miara_is_not_watched_as_open(self):
         # Nanit still has the nap open; someone ended it in Miara, and the result says so.
         state = {"open": {"b1": {"key": "s:a", "start": "2026-11-18T11:00:00Z"}}}
