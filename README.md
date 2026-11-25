@@ -100,6 +100,7 @@ To try it first with made-up data, sending an invented baby's sleeps to Miara's 
 | When | It checks Nanit |
 |---|---|
 | A sleep is going on | every minute, so the wake shows up quickly |
+| The baby is in bed but not asleep yet | every minute, so the sleep shows up as soon as Nanit posts it |
 | Something happened in the last two hours | every 2 minutes |
 | Quiet | every 10 minutes |
 | Someone opens Miara | right away |
@@ -127,6 +128,7 @@ After a restart, `.venv/bin/python bridge.py status` says whether it's running a
 
 - A sleep starts at Nanit's **fell asleep** (or **put down asleep**) and ends at its **woke up** (or **taken out asleep**).
 - A wake shorter than 5 minutes doesn't end the sleep, in the live entry or in Nanit's finished record, which splits a night at every wake.
+- Nanit posts **fell asleep** 13–17 minutes after the time it gives it, and **woke up** about 4 minutes after. Miara shows the sleep from Nanit's time, so it can show up already 15 minutes long.
 - When Nanit's own finished record arrives, usually soon after the wake, its times replace the live ones on the same entry.
 - If someone already logged that sleep in Miara, the bridge's version doesn't become a second entry. Miara asks them whether to use Nanit's times.
 - A sleep whose wake Nanit never reported is treated as over after 16 hours, and Nanit's finished record corrects it when it arrives.

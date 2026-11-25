@@ -65,6 +65,9 @@ SHORT_WAKE = timedelta(minutes=5)
 FEED_LAG = timedelta(minutes=20)
 # A sleep whose wake we never saw is treated as over after this long.
 MAX_OPEN = timedelta(hours=16)
+# Put in bed and not yet asleep: watched every minute for this long, so a FELL_ASLEEP is picked up
+# as soon as Nanit's feed posts it, not at the next quiet check.
+SETTLE_WINDOW = timedelta(minutes=90)
 # Room readings at most this often.
 ROOM_EVERY = timedelta(minutes=10)
 # Also send sleeps someone logged in the Nanit app. Off: if you log in Miara too, they'd overlap.
@@ -72,7 +75,7 @@ ROOM_EVERY = timedelta(minutes=10)
 INCLUDE_NANIT_LOGS = os.environ.get("NANIT_INCLUDE_LOGS", "1") != "0"
 
 # watch: how long to wait between syncs.
-WATCH_ASLEEP = 60        # a sleep is open: catch the wake within a minute
+WATCH_ASLEEP = 60        # a sleep is open, or the baby is in bed and not yet asleep
 WATCH_ACTIVE = 120       # something happened in the last two hours
 WATCH_QUIET = 600        # nothing for two hours
 WATCH_MAX_BACKOFF = 900  # after errors
@@ -106,6 +109,19 @@ async def fetch_async(n: nanit.Nanit, state: dict, now: datetime) -> list[dict]:
 
 STARTS = {"FELL_ASLEEP", "PUT_TO_SLEEP"}
 ENDS = {"WOKE_UP", "REMOVED_ASLEEP", "REMOVED"}
+IN_BED = {"PUT_IN_BED"}
+
+
+def settling_since(feed: list[dict]) -> datetime | None:
+    """When the baby was put in bed awake, if that's the latest thing Nanit saw: not asleep, not taken out."""
+    events = [e for e in feed if e.get("kind", "event") == "event" and e.get("key") in STARTS | ENDS | IN_BED
+              and not e.get("deleted_at") and e.get("time") is not None]
+    if not events:
+        return None
+    last = max(events, key=lambda e: float(e["time"]))
+    if last["key"] not in IN_BED:
+        return None
+    return datetime.fromtimestamp(float(last["time"]), timezone.utc)
 
 
 def sleeps_from_feed(feed: list[dict], open_sleep: dict | None = None) -> list[dict]:
@@ -387,6 +403,11 @@ def map(items: list[dict], state: dict | None = None, children: dict | None = No
             state["open"][uid] = still_open
         else:
             state["open"].pop(uid, None)
+        settled_at = None if still_open else settling_since(it.get("feed", []))
+        if settled_at:
+            state.setdefault("settling", {})[uid] = iso(settled_at)
+        else:
+            state.setdefault("settling", {}).pop(uid, None)
 
         if INCLUDE_NANIT_LOGS:
             logs, unread = logs_from_calendar(uid, it.get("calendar", []), child)
@@ -422,6 +443,11 @@ def prune_known(state: dict, keep: timedelta, now: datetime | None = None) -> No
 def is_asleep(state: dict) -> bool:
     """A sleep is going on: Nanit has it open, and nobody has ended it in Miara."""
     return any(not ended_in_miara(state, o.get("key")) for o in state.get("open", {}).values())
+
+
+def is_settling(state: dict, now: datetime) -> bool:
+    """Put in bed in the last SETTLE_WINDOW and not yet asleep or taken out."""
+    return any(now - parse_time(at) < SETTLE_WINDOW for at in state.get("settling", {}).values())
 
 
 def recently_active(state: dict, now: datetime, within: timedelta = timedelta(hours=2)) -> bool:
@@ -889,7 +915,7 @@ async def wait_for_next(client: Client, seconds: float, state: dict) -> str:
 
 
 def next_interval(state: dict, now: datetime) -> int:
-    if is_asleep(state):
+    if is_asleep(state) or is_settling(state, now):
         return WATCH_ASLEEP
     if recently_active(state, now):
         return WATCH_ACTIVE
@@ -900,7 +926,7 @@ async def watch(n, client: Client, state: dict, state_path: Path, children: dict
     for stream in (sys.stdout, sys.stderr):  # a line at a time, so launchd's log keeps up
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(line_buffering=True)
-    print(f"{stamp()} Watching Nanit. Every {WATCH_ASLEEP}s while asleep, {WATCH_ACTIVE}s after activity, "
+    print(f"{stamp()} Watching Nanit. Every {WATCH_ASLEEP}s while asleep or settling, {WATCH_ACTIVE}s after activity, "
           f"{WATCH_QUIET}s when quiet, and right away when Miara asks. Ctrl-C to stop.")
     backoff = 0
     while True:
